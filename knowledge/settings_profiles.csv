@@ -1,0 +1,5 @@
+profile_id,delay,decay,neutralization,truncation,pasteurization,nan_handling,unit_handling,region,universe,test_period,book_size,intuition
+baseline_d1,1,4,Subindustry,0.08,On,On,Verify,US,TOP3000,Recent 5Y,20000000,Default short horizon profile balancing signal purity and turnover
+slow_value_d1,1,8,Sector,0.06,On,On,Verify,US,TOP3000,Recent 10Y,20000000,Slower profile for fundamental style signals with lower turnover
+fast_intraday_like,0,2,Subindustry,0.10,On,On,Verify,US,TOP3000,Recent 2Y,20000000,Faster response profile with higher turnover tolerance and stronger caps
+usa_top3000_consistency_v1,1,10,Subindustry,0.05,On,Off,Verify,USA,TOP3000,Recent 5Y,20000000,Consistency profile for submitted alphas to compare ideas with fixed knobs

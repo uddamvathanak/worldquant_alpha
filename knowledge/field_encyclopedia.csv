@@ -1,0 +1,26 @@
+field,category,description,alpha_use_cases,data_quality_checks,notes
+returns,Derived,Single period return from adjusted close,Base target and recent momentum/reversal features,Verify exact return convention and timing,Derived from close
+analyst_revision_30d,Estimate,Net estimate revision over last 30 days,Earnings expectation momentum,Check sparse coverage bias,Coverage sensitive
+book_value_per_share,Fundamental,Book value per share,Value style ratios and long horizon factors,Confirm negative values handling,Point-in-time critical
+ebitda,Fundamental,"Earnings before interest, tax, depreciation, and amortization.",Operating profitability and valuation denominator,Check restatements and fiscal calendar alignment,Combine with EV to avoid price-only valuation bias.
+enterprise_value,Fundamental,Enterprise value proxy (equity value plus debt minus cash).,Valuation ratios such as EV/EBITDA,Check currency alignment and point-in-time lag,Use with EBITDA for cross-sectional value.
+eps_ttm,Fundamental,Trailing twelve month earnings per share,Quality and valuation style factors,Ensure no lookahead with restatements,Point-in-time critical
+sales_ttm,Fundamental,Trailing twelve month revenue,Growth quality combinations,Align fiscal calendar timing,Point-in-time critical
+shares_outstanding,Fundamental,Total shares outstanding,Supply/dilution and valuation transforms,Check point-in-time availability,Frequently lagged updates
+industry,Group,Industry classification label,Industry neutralization and peer ranking,Monitor reclassification events,Categorical field
+sector,Group,Sector classification label,Sector neutralization and macro regime slicing,Monitor missing labels,Categorical field
+adv20,Liquidity,20 day average dollar volume,Universe filter liquidity regime interaction and capacity checks,Validate winsorization and holiday handling,Derived liquidity field
+volume,Liquidity,Traded shares/contracts in session,Liquidity filter and participation proxies,Handle zero volume days and venue anomalies,Core field
+implied_volatility_call_180,Option,Implied volatility of call options with ~180D tenor.,"Upside-risk demand, skew construction",Check sparse call surface and interpolation consistency,Use with put IV for skew normalization.
+implied_volatility_put_180,Option,Implied volatility of put options with ~180D tenor.,"Downside-risk demand, skew construction",Check stale option chains and sparse quotes,Use with call IV as relative skew.
+close,Price,Session closing price,Momentum mean reversion and return definitions,Ensure corporate action adjusted close,Core field
+high,Price,Session high price,Intraday range and breakout context,Check outliers from bad ticks,Core field
+low,Price,Session low price,Intraday range and downside pressure context,Check outliers from bad ticks,Core field
+open,Price,Basic open price at session start,Gap and overnight continuation/reversal signals,Check split adjustments and stale opens,Core field
+vwap,Price,Volume weighted average transaction price,Intraday pressure and close vs flow imbalance,Check consistency with volume and price scale,Core field
+beta,Risk,Systematic market exposure estimate,Risk balancing and beta neutral signals,Check estimation window stability,Can be unstable in stress
+cap,Risk,Company size proxy (market capitalization style field).,Bucketed neutral comparisons and size controls,Check split/currency adjustments and stale shares,"Often used for bucket grouping with densify(bucket(rank(cap),...))."
+market_cap,Risk,Firm size proxy,Size exposure control and regime splits,Confirm source refresh schedule and currency,Used in neutralization buckets
+volatility_20,Risk,20 day realized volatility,Volatility scaling and risk targeting,Verify annualization convention,Useful for risk-adjusted transforms
+nws12_afterhsz_sl,Sentiment,News sentiment score vector (after-hours aggregated).,"Attention shock, sentiment momentum, regime gating","Check sparse coverage, timestamp alignment, and source drift",Interpret as standardized news-flow signal; verify exact platform definition.
+short_interest,Sentiment,Short interest level or ratio,Crowding squeeze and bearish sentiment factors,Check reporting lag and publication cadence,Lag handling important

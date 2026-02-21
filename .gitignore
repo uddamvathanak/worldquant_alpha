@@ -1,0 +1,12 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local experiment artifacts
+hypotheses/hypotheses.jsonl
+logs/*.db
+reports/*.png
+reports/*_alpha_plan.md
+reports/*_simulation_brief.md

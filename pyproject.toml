@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldquant-alpha"
+version = "0.1.0"
+description = "Metadata-first alpha hypothesis research, field encyclopedia, and result journaling."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+wqa = "worldquant_alpha.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
