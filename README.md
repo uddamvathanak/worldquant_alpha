@@ -159,6 +159,7 @@ wqa settings-profiles
 - `docs/FASTEXPR_OPERATIONS_REFERENCE.md`
 - `docs/SETTINGS_KNOBS_PLAYBOOK.md`
 - `docs/FIELD_ENCYCLOPEDIA_GUIDE.md`
+- `docs/SIGNAL_FAMILIES.md`
 
 ## Important
 
