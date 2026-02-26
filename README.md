@@ -151,6 +151,18 @@ wqa templates --fields vwap,close,volume --hypothesis-class MeanReversion --show
 wqa settings-profiles
 ```
 
+## Alpaca Isolation
+
+Alpaca paper-trading assets are isolated under `paper/alpaca/` to keep this public repo safe.
+
+- folder guide: `paper/alpaca/README.md`
+- conda setup runbook: `docs/ALPACA_PAPER_TRADING_CONDA_SETUP.md`
+- daily runner: `paper/alpaca/rebalance_runner.py`
+- monthly evaluator: `paper/alpaca/monthly_eval.py`
+- scheduler installer: `paper/alpaca/install_scheduler.ps1`
+
+Commit only public-safe code/templates. Keep credentials and runtime artifacts local.
+
 ## Documentation
 
 - `docs/FASTEXPR_EVALUATION_NOTES.md`
@@ -160,6 +172,7 @@ wqa settings-profiles
 - `docs/SETTINGS_KNOBS_PLAYBOOK.md`
 - `docs/FIELD_ENCYCLOPEDIA_GUIDE.md`
 - `docs/SIGNAL_FAMILIES.md`
+- `docs/ALPACA_PAPER_TRADING_CONDA_SETUP.md`
 
 ## Important
 

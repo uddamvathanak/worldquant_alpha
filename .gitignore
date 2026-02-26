@@ -10,3 +10,19 @@ logs/*.db
 reports/*.png
 reports/*_alpha_plan.md
 reports/*_simulation_brief.md
+
+# ignore the env as well
+.env
+
+# Alpaca paper trading local-only artifacts
+paper/alpaca/.env
+paper/alpaca/logs/*
+paper/alpaca/state/*
+paper/alpaca/tmp/*
+paper/alpaca/private/*
+paper/alpaca/signals/*
+paper/alpaca/*.db
+paper/alpaca/*.sqlite*
+!paper/alpaca/logs/.gitkeep
+!paper/alpaca/state/.gitkeep
+!paper/alpaca/signals/.gitkeep
