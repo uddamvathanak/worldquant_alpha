@@ -123,6 +123,7 @@ class PaperTracker:
                     target_side TEXT NOT NULL,
                     order_side TEXT NOT NULL,
                     order_notional REAL NOT NULL,
+                    order_qty REAL NOT NULL DEFAULT 0,
                     target_weight REAL NOT NULL,
                     target_notional REAL NOT NULL,
                     current_notional REAL NOT NULL,
@@ -170,7 +171,24 @@ class PaperTracker:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_orders_run_id ON order_events(run_id)"
             )
+            self._ensure_column(
+                conn,
+                "order_events",
+                "order_qty",
+                "REAL NOT NULL DEFAULT 0",
+            )
             conn.commit()
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        ddl: str,
+    ) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def _now_pair(self) -> tuple[str, str]:
         now_utc = datetime.now(UTC)
@@ -345,6 +363,7 @@ class PaperTracker:
                         str(row.get("target_side", "")),
                         str(row.get("order_side", "")),
                         float(row.get("order_notional", 0.0)),
+                        float(row.get("order_qty", 0.0)),
                         float(row.get("target_weight", 0.0)),
                         float(row.get("target_notional", 0.0)),
                         float(row.get("current_notional", 0.0)),
@@ -358,9 +377,9 @@ class PaperTracker:
                 """
                 INSERT INTO order_events (
                     run_id, pass_num, event_ts_utc, event_ts_et, symbol, target_side,
-                    order_side, order_notional, target_weight, target_notional,
+                    order_side, order_notional, order_qty, target_weight, target_notional,
                     current_notional, delta_notional, order_id, status, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

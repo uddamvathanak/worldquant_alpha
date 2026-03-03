@@ -23,11 +23,73 @@ ACCEPTED_ORDER_STATUSES = {
 }
 
 
+def augment_targets_with_flat_positions(
+    targets: pd.DataFrame,
+    positions: pd.DataFrame,
+) -> pd.DataFrame:
+    base_cols = [
+        "symbol",
+        "side",
+        "sector",
+        "score",
+        "target_weight",
+        "target_notional",
+        "force_order",
+    ]
+
+    if targets is None or targets.empty:
+        core = pd.DataFrame(columns=base_cols)
+    else:
+        core = targets.copy()
+        if "force_order" not in core.columns:
+            core["force_order"] = False
+        for col in base_cols:
+            if col not in core.columns:
+                if col == "force_order":
+                    core[col] = False
+                elif col in {"score", "target_weight", "target_notional"}:
+                    core[col] = 0.0
+                else:
+                    core[col] = ""
+        core = core[base_cols]
+        core["symbol"] = core["symbol"].astype(str).str.strip().str.upper()
+        core["force_order"] = core["force_order"].fillna(False).astype(bool)
+
+    if positions is None or positions.empty:
+        return core.reset_index(drop=True)
+
+    held = positions.copy()
+    held["symbol"] = held["symbol"].astype(str).str.strip().str.upper()
+    if "signed_market_value" in held.columns:
+        held = held[held["signed_market_value"].astype(float).abs() > 0.0]
+
+    held_symbols = set(held["symbol"].tolist())
+    target_symbols = set(core["symbol"].astype(str).tolist())
+    dropped_symbols = sorted(held_symbols - target_symbols)
+    if not dropped_symbols:
+        return core.reset_index(drop=True)
+
+    flatten_rows = pd.DataFrame(
+        {
+            "symbol": dropped_symbols,
+            "side": "flat",
+            "sector": "UNMAPPED",
+            "score": 0.0,
+            "target_weight": 0.0,
+            "target_notional": 0.0,
+            "force_order": True,
+        }
+    )
+    out = pd.concat([core, flatten_rows], ignore_index=True)
+    return out.reset_index(drop=True)
+
+
 def build_order_plan(
     targets: pd.DataFrame,
     positions: pd.DataFrame,
     *,
     min_order_notional: float,
+    price_map: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     if targets.empty:
         return pd.DataFrame(
@@ -42,6 +104,7 @@ def build_order_plan(
                 "delta_notional",
                 "order_side",
                 "order_notional",
+                "order_qty",
             ]
         )
 
@@ -53,11 +116,35 @@ def build_order_plan(
             )
 
     plan = targets.copy()
+    if "force_order" not in plan.columns:
+        plan["force_order"] = False
+    plan["force_order"] = plan["force_order"].fillna(False).astype(bool)
     plan["current_notional"] = plan["symbol"].map(lambda s: current_map.get(s, 0.0))
     plan["delta_notional"] = plan["target_notional"] - plan["current_notional"]
     plan["order_side"] = plan["delta_notional"].map(lambda v: "buy" if v > 0 else "sell")
     plan["order_notional"] = plan["delta_notional"].abs()
-    plan = plan[plan["order_notional"] >= float(min_order_notional)].copy()
+    keep_mask = (plan["order_notional"] >= float(min_order_notional)) | plan["force_order"]
+    plan = plan[keep_mask].copy()
+    plan["order_qty"] = pd.NA
+
+    if price_map:
+        is_short_target = plan["side"] == "short"
+        if is_short_target.any():
+            short_prices = plan.loc[is_short_target, "symbol"].map(
+                lambda s: float(price_map.get(str(s).upper(), 0.0))
+            )
+            qty_values = (
+                plan.loc[is_short_target, "order_notional"]
+                .astype(float)
+                .div(short_prices.replace(0.0, pd.NA))
+                .fillna(0.0)
+                .map(lambda x: int(x) if x >= 1 else 0)
+            )
+            plan.loc[is_short_target, "order_qty"] = qty_values
+            order_qty_series = pd.to_numeric(plan["order_qty"], errors="coerce").fillna(0).astype(int)
+            keep_mask = (~is_short_target) | (order_qty_series >= 1)
+            plan = plan[keep_mask].copy()
+
     plan = plan.sort_values("order_notional", ascending=False).reset_index(drop=True)
     plan = plan.rename(columns={"side": "target_side"})
     cols = [
@@ -71,6 +158,7 @@ def build_order_plan(
         "delta_notional",
         "order_side",
         "order_notional",
+        "order_qty",
     ]
     return plan[cols]
 
@@ -93,6 +181,7 @@ def execute_order_plan(
                 "target_side",
                 "order_side",
                 "order_notional",
+                "order_qty",
                 "target_weight",
                 "target_notional",
                 "current_notional",
@@ -111,6 +200,8 @@ def execute_order_plan(
         symbol = str(row["symbol"])
         order_side = str(row["order_side"])
         order_notional = float(row["order_notional"])
+        order_qty_raw = row.get("order_qty", pd.NA)
+        order_qty = int(order_qty_raw) if pd.notna(order_qty_raw) else 0
         order_id = ""
         status = ""
         error = ""
@@ -119,12 +210,20 @@ def execute_order_plan(
         else:
             try:
                 client_order_id = f"{run_id}-p{pass_num}-{uuid.uuid4().hex[:8]}"
-                result = broker.submit_market_notional_order(
-                    symbol=symbol,
-                    side=order_side,
-                    notional=order_notional,
-                    client_order_id=client_order_id,
-                )
+                if order_qty >= 1:
+                    result = broker.submit_market_qty_order(
+                        symbol=symbol,
+                        side=order_side,
+                        qty=order_qty,
+                        client_order_id=client_order_id,
+                    )
+                else:
+                    result = broker.submit_market_notional_order(
+                        symbol=symbol,
+                        side=order_side,
+                        notional=order_notional,
+                        client_order_id=client_order_id,
+                    )
                 order_id = str(result.get("order_id", ""))
                 status = str(result.get("status", "submitted")).strip().lower()
             except Exception as exc:  # pragma: no cover - integration path
@@ -140,6 +239,7 @@ def execute_order_plan(
                 "target_side": str(row["target_side"]),
                 "order_side": order_side,
                 "order_notional": order_notional,
+                "order_qty": int(order_qty),
                 "target_weight": float(row["target_weight"]),
                 "target_notional": float(row["target_notional"]),
                 "current_notional": float(row["current_notional"]),
@@ -201,4 +301,3 @@ def merge_event_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     if not filtered:
         return pd.DataFrame()
     return pd.concat(filtered, ignore_index=True)
-

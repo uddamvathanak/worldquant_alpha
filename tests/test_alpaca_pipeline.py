@@ -13,6 +13,7 @@ if str(ALPACA_DIR) not in sys.path:
     sys.path.insert(0, str(ALPACA_DIR))
 
 from execution import (  # type: ignore  # noqa: E402
+    augment_targets_with_flat_positions,
     build_order_plan,
     execute_order_plan,
     extract_rejected_short_symbols,
@@ -20,7 +21,7 @@ from execution import (  # type: ignore  # noqa: E402
 from monthly_eval import compute_proxy_metrics  # type: ignore  # noqa: E402
 from portfolio_builder import (  # type: ignore  # noqa: E402
     build_sector_neutral_targets,
-    drop_and_rescale_rejected_shorts,
+    drop_rejected_shorts_and_reneutralize,
     portfolio_exposure,
 )
 from signal_loader import SignalValidationError, validate_signal_frame  # type: ignore  # noqa: E402
@@ -121,16 +122,28 @@ class _DummyBroker:
             raise RuntimeError("short rejected")
         return {"order_id": client_order_id, "status": "new"}
 
+    def submit_market_qty_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty: int,
+        client_order_id: str,
+    ) -> dict[str, str]:
+        if symbol == "S2":
+            raise RuntimeError("short rejected")
+        return {"order_id": client_order_id, "status": "new"}
 
-def test_rejected_shorts_are_detected_and_rescaled() -> None:
+
+def test_rejected_shorts_are_detected_and_reneutralized() -> None:
     targets = pd.DataFrame(
         {
             "symbol": ["L1", "S1", "S2"],
             "side": ["long", "short", "short"],
             "sector": ["Tech", "Tech", "Tech"],
             "score": [1.0, -1.0, -0.9],
-            "target_weight": [0.4, -0.2, -0.2],
-            "target_notional": [40_000.0, -20_000.0, -20_000.0],
+            "target_weight": [0.5, -0.2, -0.2],
+            "target_notional": [50_000.0, -20_000.0, -20_000.0],
         }
     )
     positions = pd.DataFrame(
@@ -155,14 +168,148 @@ def test_rejected_shorts_are_detected_and_rescaled() -> None:
     rejected = extract_rejected_short_symbols(events)
     assert rejected == ["S2"]
 
-    corrected = drop_and_rescale_rejected_shorts(
+    corrected = drop_rejected_shorts_and_reneutralize(
         targets,
         rejected_symbols=rejected,
         short_gross_target=0.4,
     )
     short_side = corrected[corrected["side"] == "short"]
+    long_side = corrected[corrected["side"] == "long"]
     assert len(short_side) == 1
+    assert len(long_side) == 1
     assert pytest.approx(float(short_side["target_weight"].sum()), abs=1e-9) == -0.4
+    assert pytest.approx(float(long_side["target_weight"].sum()), abs=1e-9) == 0.4
+
+
+def test_all_shorts_rejected_zeroes_long_side() -> None:
+    targets = pd.DataFrame(
+        {
+            "symbol": ["L1", "L2", "S1", "S2"],
+            "side": ["long", "long", "short", "short"],
+            "sector": ["Tech", "Health", "Tech", "Health"],
+            "score": [1.1, 1.0, -1.1, -1.0],
+            "target_weight": [0.2, 0.2, -0.2, -0.2],
+            "target_notional": [20_000.0, 20_000.0, -20_000.0, -20_000.0],
+        }
+    )
+    corrected = drop_rejected_shorts_and_reneutralize(
+        targets,
+        rejected_symbols=["S1", "S2"],
+        short_gross_target=0.4,
+    )
+    assert corrected[corrected["side"] == "short"].empty
+    assert pytest.approx(
+        float(corrected.loc[corrected["side"] == "long", "target_weight"].sum()),
+        abs=1e-9,
+    ) == 0.0
+
+
+def test_augment_targets_with_flat_positions_adds_dropped_symbols() -> None:
+    core_targets = pd.DataFrame(
+        {
+            "symbol": ["L1", "S1"],
+            "side": ["long", "short"],
+            "sector": ["Tech", "Tech"],
+            "score": [1.0, -1.0],
+            "target_weight": [0.4, -0.4],
+            "target_notional": [40_000.0, -40_000.0],
+        }
+    )
+    positions = pd.DataFrame(
+        {
+            "symbol": ["L1", "OLD"],
+            "qty": [100.0, 10.0],
+            "side": ["long", "long"],
+            "market_value": [40_000.0, 500.0],
+            "signed_market_value": [40_000.0, 500.0],
+            "avg_entry_price": [400.0, 50.0],
+            "unrealized_pl": [0.0, 0.0],
+        }
+    )
+    effective = augment_targets_with_flat_positions(core_targets, positions)
+    flat_rows = effective[effective["side"] == "flat"]
+    assert len(flat_rows) == 1
+    assert flat_rows.iloc[0]["symbol"] == "OLD"
+    assert bool(flat_rows.iloc[0]["force_order"]) is True
+
+
+def test_flat_orders_bypass_min_notional_filter() -> None:
+    core_targets = pd.DataFrame(
+        {
+            "symbol": ["L1", "S1"],
+            "side": ["long", "short"],
+            "sector": ["Tech", "Tech"],
+            "score": [1.0, -1.0],
+            "target_weight": [0.4, -0.4],
+            "target_notional": [40_000.0, -40_000.0],
+        }
+    )
+    positions = pd.DataFrame(
+        {
+            "symbol": ["L1", "DUST"],
+            "qty": [100.0, 0.1],
+            "side": ["long", "long"],
+            "market_value": [40_000.0, 5.0],
+            "signed_market_value": [40_000.0, 5.0],
+            "avg_entry_price": [400.0, 50.0],
+            "unrealized_pl": [0.0, 0.0],
+        }
+    )
+    effective = augment_targets_with_flat_positions(core_targets, positions)
+    plan = build_order_plan(
+        effective,
+        positions,
+        min_order_notional=100.0,
+        price_map={"S1": 200.0},
+    )
+    dust_rows = plan[plan["symbol"] == "DUST"]
+    assert len(dust_rows) == 1
+    assert dust_rows.iloc[0]["target_side"] == "flat"
+    assert dust_rows.iloc[0]["order_side"] == "sell"
+    assert float(dust_rows.iloc[0]["order_notional"]) < 100.0
+
+
+def test_short_side_uses_qty_orders_when_prices_available() -> None:
+    targets = pd.DataFrame(
+        {
+            "symbol": ["L1", "S1"],
+            "side": ["long", "short"],
+            "sector": ["Tech", "Tech"],
+            "score": [1.0, -1.0],
+            "target_weight": [0.4, -0.4],
+            "target_notional": [40_000.0, -40_000.0],
+        }
+    )
+    positions = pd.DataFrame(
+        columns=[
+            "symbol",
+            "qty",
+            "side",
+            "market_value",
+            "signed_market_value",
+            "avg_entry_price",
+            "unrealized_pl",
+        ]
+    )
+    plan = build_order_plan(
+        targets,
+        positions,
+        min_order_notional=100.0,
+        price_map={"S1": 200.0},
+    )
+    short_row = plan[plan["target_side"] == "short"].iloc[0]
+    assert int(short_row["order_qty"]) == 200
+
+    events = execute_order_plan(
+        _DummyBroker(),
+        plan,
+        run_id="runqty",
+        pass_num=1,
+        dry_run=False,
+    )
+    short_event = events[events["target_side"] == "short"].iloc[0]
+    assert int(short_event["order_qty"]) == 200
+    assert short_event["status"] == "new"
 
 
 def test_monthly_proxy_metrics_positive_series() -> None:
@@ -186,4 +333,3 @@ def test_monthly_proxy_metrics_positive_series() -> None:
     assert summary["fitness_proxy"] > 0
     assert summary["returns"] > 0
     assert summary["max_drawdown"] == 0.0
-

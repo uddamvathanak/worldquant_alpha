@@ -157,7 +157,10 @@ Alpaca paper-trading assets are isolated under `paper/alpaca/` to keep this publ
 
 - folder guide: `paper/alpaca/README.md`
 - conda setup runbook: `docs/ALPACA_PAPER_TRADING_CONDA_SETUP.md`
-- daily runner: `paper/alpaca/rebalance_runner.py`
+- signal generator: `paper/alpaca/signal_generator.py`
+- universe builder: `paper/alpaca/universe_builder.py`
+- daily pipeline runner: `paper/alpaca/daily_pipeline.py`
+- rebalance-only runner: `paper/alpaca/rebalance_runner.py`
 - monthly evaluator: `paper/alpaca/monthly_eval.py`
 - scheduler installer: `paper/alpaca/install_scheduler.ps1`
 

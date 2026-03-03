@@ -62,39 +62,79 @@ Do not:
 - commit private strategy details under `paper/alpaca/private/`
 - commit runtime logs/state/database/signal files
 
-## 6) Signal input format
+## 6) Universe + signal pipeline options
 
-Daily signal file path:
+You now have three modes:
+
+1. Auto-refresh a liquid universe from Alpaca assets:
+```powershell
+conda run -n alpaca-paper python paper/alpaca/universe_builder.py --max-symbols 3000 --shortable-only
+```
+
+2. Auto-generate signals from Alpaca market data:
+```powershell
+conda run -n alpaca-paper python paper/alpaca/signal_generator.py
+```
+
+3. Provide your own signal CSV manually:
 - `paper/alpaca/signals/YYYY-MM-DD.csv` (ET date)
+- required columns: `symbol,score,sector`
+- optional: `asof_date`
 
-Required CSV columns:
-- `symbol`
-- `score`
-- `sector`
+Auto-universe defaults:
+- output: `paper/alpaca/private/universe.csv`
+- ranking: average dollar volume over 20 days
+- min filters: price >= 3, avg dollar volume >= 0, coverage >= 80%
+- shortability policy: `shortable_only` by default
 
-Optional CSV column:
-- `asof_date`
+Auto-generator expects:
+- `paper/alpaca/private/universe.csv` with a `symbol` column
+- optional `paper/alpaca/private/sector_map.csv` with columns `symbol,sector`
+- if sector map is missing, `sector=ALL` is used
 
 ## 7) Daily run command
 
+Recommended full pipeline (refresh universe + generate signal + rebalance):
 ```powershell
-conda run -n alpaca-paper python paper/alpaca/rebalance_runner.py
+conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py
+```
+
+If you want to use a fixed universe file and skip refresh:
+```powershell
+conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --skip-universe-refresh
 ```
 
 Dry-run mode (no order submission):
 ```powershell
-conda run -n alpaca-paper python paper/alpaca/rebalance_runner.py --dry-run
+conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --dry-run
 ```
+
+Rebalance behavior notes:
+- strict target-match: dropped symbols are flattened via synthetic `flat` targets.
+- reject correction: if shorts are rejected, runner does a corrective pass that re-neutralizes both sides.
+- skip statuses hold positions (no auto-flatten).
 
 Run a specific date:
 ```powershell
-conda run -n alpaca-paper python paper/alpaca/rebalance_runner.py --date 2026-02-25
+conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --date 2026-02-25
 ```
 
 ## 8) Install Windows task scheduler job
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File paper/alpaca/install_scheduler.ps1
+```
+
+If your machine timezone is not ET (for example Singapore), install with ET market-time tracking:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File paper/alpaca/install_scheduler.ps1
+```
+
+Verify task:
+
+```powershell
+schtasks /Query /TN "WQA_Alpaca_Rebalance_0935ET" /V /FO LIST
 ```
 
 Task defaults:
@@ -104,6 +144,11 @@ Task defaults:
 - network required: on
 - retries: 2 (10-minute interval)
 - time limit: 20 minutes
+- ET tracking mode derives local trigger times from `09:35 ET` and handles DST shifts.
+- Runner ET gate (`--enforce-et-window`) executes only near target ET time to avoid duplicate runs from dual local triggers.
+- Scheduler action runs `paper/alpaca/daily_pipeline.py` so universe refresh + signal generation happen before rebalance.
+
+If registration fails with `Access is denied`, open PowerShell as Administrator and rerun the installer.
 
 ## 9) Month-end proxy evaluation
 
@@ -115,10 +160,31 @@ This writes:
 - `paper/alpaca/logs/summary_YYYY-MM.csv`
 - copy-ready `wqa log-result` command printed in terminal
 
-## 10) Suggested project layout for paper trading phase
+## 10) Manual emergency flatten command
+
+Preview close-all without placing orders:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/liquidate_all.py --dry-run
+```
+
+Execute close-all now:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/liquidate_all.py --yes
+```
+
+Useful option:
+- add `--no-cancel-open-orders` to keep existing open orders untouched
+
+## 11) Suggested project layout for paper trading phase
 
 - `paper/alpaca/smoke_test.py`
+- `paper/alpaca/universe_builder.py`
+- `paper/alpaca/signal_generator.py`
+- `paper/alpaca/daily_pipeline.py`
 - `paper/alpaca/rebalance_runner.py`
+- `paper/alpaca/liquidate_all.py`
 - `paper/alpaca/monthly_eval.py`
 - `paper/alpaca/install_scheduler.ps1`
 - `paper/alpaca/.env.example`
@@ -128,10 +194,14 @@ This writes:
 - `paper/alpaca/tmp/`
 - `paper/alpaca/private/`
 
-## 11) Operational rules before running continuously
+## 12) Operational rules before running continuously
 
 - Add a hard kill switch by max daily drawdown.
 - Add notional and symbol concentration limits.
 - Add retry logic with idempotency around order submission.
 - Record every order and fill locally for audit.
 - Run a scheduled heartbeat check for connectivity.
+- Keep short orders in whole-share qty mode (fractional short sell is rejected by Alpaca).
+- Ensure strict target matching is enabled in runner logic so dropped symbols are actively flattened.
+- On skip statuses (`skipped_*`), keep current holdings unchanged unless you manually run `liquidate_all.py`.
+

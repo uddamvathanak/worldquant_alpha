@@ -1,6 +1,7 @@
 field,category,description,alpha_use_cases,data_quality_checks,notes
 returns,Derived,Single period return from adjusted close,Base target and recent momentum/reversal features,Verify exact return convention and timing,Derived from close
-analyst_revision_30d,Estimate,Net estimate revision over last 30 days,Earnings expectation momentum,Check sparse coverage bias,Coverage sensitive
+anl4_afv4_eps_high,Estimate,Analyst estimate series (Analyst4) for EPS-high consensus proxy,Earnings expectation momentum via estimate-change transforms (for example ts_delta over 20d),Check sparse analyst coverage and backfill behavior,Use as revision proxy with ts_delta
+anl4_fcf_flag,Estimate,Analyst4 field commonly used in public Fast Expression examples,Analyst-family auxiliary confirmation or regime feature,Check field sparsity and stable coverage by subindustry,Not a direct revision field
 book_value_per_share,Fundamental,Book value per share,Value style ratios and long horizon factors,Confirm negative values handling,Point-in-time critical
 ebitda,Fundamental,"Earnings before interest, tax, depreciation, and amortization.",Operating profitability and valuation denominator,Check restatements and fiscal calendar alignment,Combine with EV to avoid price-only valuation bias.
 enterprise_value,Fundamental,Enterprise value proxy (equity value plus debt minus cash).,Valuation ratios such as EV/EBITDA,Check currency alignment and point-in-time lag,Use with EBITDA for cross-sectional value.
@@ -22,5 +23,7 @@ beta,Risk,Systematic market exposure estimate,Risk balancing and beta neutral si
 cap,Risk,Company size proxy (market capitalization style field).,Bucketed neutral comparisons and size controls,Check split/currency adjustments and stale shares,"Often used for bucket grouping with densify(bucket(rank(cap),...))."
 market_cap,Risk,Firm size proxy,Size exposure control and regime splits,Confirm source refresh schedule and currency,Used in neutralization buckets
 volatility_20,Risk,20 day realized volatility,Volatility scaling and risk targeting,Verify annualization convention,Useful for risk-adjusted transforms
+historical_volatility_120,Risk,120 day historical realized volatility,Volatility risk premium proxy and medium-horizon risk normalization,Verify annualization convention and stale values,Known working field in your submitted VRP alpha
+parkinson_volatility_120,Risk,120 day Parkinson high-low estimator volatility,Alternative realized volatility proxy using intraday range information,Check high-low outliers and range data quality,Good fallback for VRP leg if historical_volatility field coverage differs
 nws12_afterhsz_sl,Sentiment,News sentiment score vector (after-hours aggregated).,"Attention shock, sentiment momentum, regime gating","Check sparse coverage, timestamp alignment, and source drift",Interpret as standardized news-flow signal; verify exact platform definition.
 short_interest,Sentiment,Short interest level or ratio,Crowding squeeze and bearish sentiment factors,Check reporting lag and publication cadence,Lag handling important

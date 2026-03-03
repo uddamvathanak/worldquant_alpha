@@ -3,3 +3,6 @@ baseline_d1,1,4,Subindustry,0.08,On,On,Verify,US,TOP3000,Recent 5Y,20000000,Defa
 slow_value_d1,1,8,Sector,0.06,On,On,Verify,US,TOP3000,Recent 10Y,20000000,Slower profile for fundamental style signals with lower turnover
 fast_intraday_like,0,2,Subindustry,0.10,On,On,Verify,US,TOP3000,Recent 2Y,20000000,Faster response profile with higher turnover tolerance and stronger caps
 usa_top3000_consistency_v1,1,10,Subindustry,0.05,On,Off,Verify,USA,TOP3000,Recent 5Y,20000000,Consistency profile for submitted alphas to compare ideas with fixed knobs
+usa_top3000_consistency_d20_v1,1,20,Subindustry,0.05,On,Off,Verify,USA,TOP3000,Recent 5Y,20000000,Pass-gate-first profile with locked Decay 20 for direct candidate comparability
+v5_usa_d1_locked,1,20,Subindustry,0.05,On,Off,Verify,USA,TOP3000,Recent 5Y,20000000,Cycle v5 locked D1 profile for pass-first comparability
+v5_usa_d0_locked,0,8,Subindustry,0.05,On,Off,Verify,USA,TOP3000,Recent 5Y,20000000,Cycle v5 locked D0 profile for diversification branch

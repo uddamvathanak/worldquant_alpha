@@ -10,8 +10,9 @@ import uuid
 import pandas as pd
 
 from broker_alpaca import AlpacaBroker
-from config import load_config, parse_trade_date
+from config import et_now, load_config, parse_trade_date
 from execution import (
+    augment_targets_with_flat_positions,
     build_order_plan,
     estimate_traded_notional,
     estimate_turnover,
@@ -21,7 +22,7 @@ from execution import (
 )
 from portfolio_builder import (
     build_sector_neutral_targets,
-    drop_and_rescale_rejected_shorts,
+    drop_rejected_shorts_and_reneutralize,
     portfolio_exposure,
 )
 from signal_loader import load_signal_file, signal_path_for_date
@@ -65,6 +66,37 @@ def _max_drawdown(equity_curve: list[float]) -> float:
     peaks = series.cummax()
     drawdowns = (peaks - series) / peaks.replace(0, pd.NA)
     return float(drawdowns.fillna(0.0).max())
+
+
+def _minutes_of_day(hour: int, minute: int) -> int:
+    return int(hour * 60 + minute)
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid time format: {value}. Expected HH:MM.")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(f"Invalid time value: {value}.")
+    return hour, minute
+
+
+def _is_within_et_window(target_hhmm: str, *, window_minutes: int) -> tuple[bool, str]:
+    now = et_now()
+    target_hour, target_minute = _parse_hhmm(target_hhmm)
+    now_m = _minutes_of_day(now.hour, now.minute)
+    target_m = _minutes_of_day(target_hour, target_minute)
+    direct = abs(now_m - target_m)
+    wrapped = 1440 - direct
+    delta = min(direct, wrapped)
+    ok = delta <= window_minutes
+    detail = (
+        f"now_et={now.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+        f"target_et={target_hhmm} delta_min={delta} window_min={window_minutes}"
+    )
+    return ok, detail
 
 
 def _detect_and_log_missed_runs(
@@ -174,6 +206,19 @@ def run_rebalance(args: argparse.Namespace) -> int:
     )
 
     try:
+        if args.enforce_et_window and not args.date:
+            et_target = args.et_target_time.strip() or cfg.scheduler_time_et
+            et_window = max(1, int(args.et_window_minutes))
+            in_window, detail = _is_within_et_window(et_target, window_minutes=et_window)
+            if not in_window:
+                tracker.update_run_finish(
+                    run_id,
+                    status="skipped_schedule_window",
+                    reason=detail,
+                )
+                print(f"[{trade_date}] skipped_schedule_window {detail}")
+                return 0
+
         api_key, api_secret = cfg.require_alpaca_credentials()
         broker = AlpacaBroker(api_key, api_secret, paper=True)
 
@@ -244,13 +289,16 @@ def run_rebalance(args: argparse.Namespace) -> int:
             gross_exposure=cfg.gross_exposure,
             shortable_map=shortable_map,
         )
-        targets = build.targets
-        tracker.log_targets(run_id=run_id, targets=targets, target_stage="initial")
+        core_targets = build.targets
+        effective_targets = augment_targets_with_flat_positions(core_targets, positions_pre)
+        tracker.log_targets(run_id=run_id, targets=effective_targets, target_stage="initial")
+        price_map = broker.get_latest_price_map(effective_targets["symbol"].tolist())
 
         order_plan_1 = build_order_plan(
-            targets,
+            effective_targets,
             positions_pre,
             min_order_notional=cfg.min_order_notional,
+            price_map=price_map,
         )
         events_1 = execute_order_plan(
             broker,
@@ -262,23 +310,30 @@ def run_rebalance(args: argparse.Namespace) -> int:
         events_all: list[pd.DataFrame] = [events_1]
 
         rejected_shorts = extract_rejected_short_symbols(events_1)
-        final_targets = targets.copy()
+        final_core_targets = core_targets.copy()
+        final_effective_targets = effective_targets.copy()
         if rejected_shorts:
-            final_targets = drop_and_rescale_rejected_shorts(
-                targets,
+            final_core_targets = drop_rejected_shorts_and_reneutralize(
+                core_targets,
                 rejected_shorts,
                 short_gross_target=cfg.short_gross_target,
             )
+            positions_mid = broker.list_positions() if not args.dry_run else positions_pre
+            final_effective_targets = augment_targets_with_flat_positions(
+                final_core_targets,
+                positions_mid,
+            )
             tracker.log_targets(
                 run_id=run_id,
-                targets=final_targets,
+                targets=final_effective_targets,
                 target_stage="corrective",
             )
-            positions_mid = broker.list_positions() if not args.dry_run else positions_pre
+            price_map_mid = broker.get_latest_price_map(final_effective_targets["symbol"].tolist())
             order_plan_2 = build_order_plan(
-                final_targets,
+                final_effective_targets,
                 positions_mid,
                 min_order_notional=cfg.min_order_notional,
+                price_map=price_map_mid,
             )
             events_2 = execute_order_plan(
                 broker,
@@ -327,21 +382,46 @@ def run_rebalance(args: argparse.Namespace) -> int:
         post_export = positions_post.copy()
         post_export["snapshot_stage"] = "post"
         positions_export = pd.concat([pre_export, post_export], ignore_index=True)
+        targets_export = final_effective_targets.drop(columns=["force_order"], errors="ignore")
         tracker.export_daily_csvs(
             trade_date=trade_date,
             account=account_export,
             positions=positions_export,
-            targets=final_targets,
+            targets=targets_export,
             orders=events,
         )
 
-        exposure = portfolio_exposure(final_targets) if not final_targets.empty else {}
+        core_exposure = (
+            portfolio_exposure(final_core_targets) if not final_core_targets.empty else {}
+        )
+        effective_exposure = (
+            portfolio_exposure(final_effective_targets)
+            if not final_effective_targets.empty
+            else {}
+        )
+        flatten_symbols = (
+            final_effective_targets.loc[
+                final_effective_targets["side"] == "flat",
+                "symbol",
+            ]
+            .astype(str)
+            .str.upper()
+            .unique()
+            .tolist()
+            if not final_effective_targets.empty
+            else []
+        )
+        flatten_symbols = sorted(flatten_symbols)
         status = "dry_run_success" if args.dry_run else "success"
         reason_payload = {
             "stats": build.stats,
             "filtered_short_symbols": build.filtered_short_symbols,
             "rejected_shorts": rejected_shorts,
-            "target_exposure": exposure,
+            "flatten_symbols_count": len(flatten_symbols),
+            "flatten_symbols_sample": flatten_symbols[:20],
+            "core_target_exposure": core_exposure,
+            "effective_target_exposure": effective_exposure,
+            "target_exposure": effective_exposure,
             "traded_notional": traded_notional,
         }
         tracker.update_run_finish(
@@ -380,6 +460,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Build targets and logs without live order submission.",
+    )
+    parser.add_argument(
+        "--enforce-et-window",
+        action="store_true",
+        help="Skip execution when current ET time is outside --et-target-time +/- --et-window-minutes.",
+    )
+    parser.add_argument(
+        "--et-target-time",
+        default="",
+        help="Target ET time in HH:MM when --enforce-et-window is enabled (default from config).",
+    )
+    parser.add_argument(
+        "--et-window-minutes",
+        type=int,
+        default=20,
+        help="Allowed ET minute distance from target time when --enforce-et-window is enabled.",
     )
     return parser
 

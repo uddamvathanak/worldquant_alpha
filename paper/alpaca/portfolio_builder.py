@@ -182,6 +182,50 @@ def drop_and_rescale_rejected_shorts(
     return out.reset_index(drop=True)
 
 
+def drop_rejected_shorts_and_reneutralize(
+    targets: pd.DataFrame,
+    rejected_symbols: list[str],
+    *,
+    short_gross_target: float,
+) -> pd.DataFrame:
+    if targets.empty or not rejected_symbols:
+        return targets.copy()
+
+    out = targets.copy()
+    reject_set = {str(symbol).strip().upper() for symbol in rejected_symbols}
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
+    out = out[~((out["side"] == "short") & (out["symbol"].isin(reject_set)))].copy()
+
+    shorts = out[out["side"] == "short"].copy()
+    longs = out[out["side"] == "long"].copy()
+
+    if shorts.empty:
+        if not longs.empty:
+            out.loc[out["side"] == "long", "target_weight"] = 0.0
+            out.loc[out["side"] == "long", "target_notional"] = 0.0
+        return out.reset_index(drop=True)
+
+    current_short_abs = float(shorts["target_weight"].abs().sum())
+    if current_short_abs <= 0:
+        if not longs.empty:
+            out.loc[out["side"] == "long", "target_weight"] = 0.0
+            out.loc[out["side"] == "long", "target_notional"] = 0.0
+        return out.reset_index(drop=True)
+
+    short_scale = float(short_gross_target / current_short_abs)
+    out.loc[out["side"] == "short", "target_weight"] *= short_scale
+    out.loc[out["side"] == "short", "target_notional"] *= short_scale
+
+    achieved_short_abs = float(out.loc[out["side"] == "short", "target_weight"].abs().sum())
+    long_gross = float(out.loc[out["side"] == "long", "target_weight"].sum())
+    if long_gross > 0:
+        long_scale = float(achieved_short_abs / long_gross)
+        out.loc[out["side"] == "long", "target_weight"] *= long_scale
+        out.loc[out["side"] == "long", "target_notional"] *= long_scale
+
+    return out.reset_index(drop=True)
+
+
 def portfolio_exposure(targets: pd.DataFrame) -> dict[str, float]:
     long_gross = float(targets.loc[targets["side"] == "long", "target_weight"].sum())
     short_gross = float(-targets.loc[targets["side"] == "short", "target_weight"].sum())
@@ -191,4 +235,3 @@ def portfolio_exposure(targets: pd.DataFrame) -> dict[str, float]:
         "short_gross": short_gross,
         "net": net,
     }
-
