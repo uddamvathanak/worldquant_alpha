@@ -1,6 +1,6 @@
 # Submitted Alpha History
 
-Last updated: 2026-03-04
+Last updated: 2026-03-05
 
 Scope: confirmed entries already marked as submitted/accepted in your log, plus your latest submitted formula.
 
@@ -8,7 +8,9 @@ Scope: confirmed entries already marked as submitted/accepted in your log, plus 
 
 - Confirmed submitted entries: `7`
 - Accepted entries (confirmed): `1`
-- Entries with missing full metrics/settings: `6`
+- Entries with full metrics logged: `1`
+- Entries missing full metrics: `6`
+- Entries missing full settings: `3`
 
 ## Registry
 
@@ -20,7 +22,7 @@ Scope: confirmed entries already marked as submitted/accepted in your log, plus 
 | 4 | `44aa91fb46c1` | Submitted | Hot News with Price Reversion | `USA TOP3000, D1, Decay 5, Trunc 0.05, Sector` | Binary news gate to reversal |
 | 5 | `14f02817e70e` | Submitted (good) | VRP + Skew Hybrid | `settings not fully logged` | You flagged this as a good submitted alpha |
 | 6 | `058b3684d75e` | Accepted | Overnight vs Intraday Flow + VWAP Reversion | `settings not fully logged` | Confirmed accepted |
-| 7 | `7b4c9e12d6f0` | Submitted (new) | Intraday Pressure + Volume Impulse Rank Combo | `settings pending` | Added from latest message |
+| 7 | `7b4c9e12d6f0` | Submitted | Intraday Pressure + Volume Impulse Rank Combo | `settings pending` | Metrics logged on 2026-03-05: Fitness `1.34`, Margin `16.27` |
 
 ## Expressions
 
@@ -83,7 +85,7 @@ combo = flow_edge + rev;
 signal = ts_mean(combo, 5);
 ```
 
-### 7) `7b4c9e12d6f0` Submitted (new) - Intraday Pressure + Volume Impulse Rank Combo
+### 7) `7b4c9e12d6f0` Submitted - Intraday Pressure + Volume Impulse Rank Combo
 
 ```text
 press = ts_mean((2 * close - high - low) / (high - low), 2);
@@ -94,8 +96,18 @@ combo = -0.45 * press_r + 0.55 * vol_r;
 signal = rank(combo);
 ```
 
+Recorded metrics (2026-03-05):
+
+- Sharpe: `1.49`
+- Turnover: `19.84%`
+- Fitness: `1.34`
+- Returns: `16.14%`
+- Drawdown: `11.50%`
+- Margin: `16.27 bps`
+- Gate check (`fitness >= 1.5` and `margin >= 12`): `FAIL` (fitness below threshold)
+
 ## Missing Data to Fill
 
-- Exact simulation settings for entries `14f02817e70e` and `058b3684d75e`
-- Full run metrics (Sharpe, Turnover, Fitness, Returns, Drawdown, Margin) for all entries
+- Exact simulation settings for entries `14f02817e70e`, `058b3684d75e`, and `7b4c9e12d6f0`
+- Full run metrics (Sharpe, Turnover, Fitness, Returns, Drawdown, Margin) for entries `dd7f42aeaef2`, `3a0ff732e0aa`, `516d0c7349a5`, `44aa91fb46c1`, `14f02817e70e`, `058b3684d75e`
 - Correlation metrics (`self_correlation`, `max_correlation`, `min_correlation`) for later filtering
