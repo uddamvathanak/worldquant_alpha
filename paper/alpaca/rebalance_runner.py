@@ -12,11 +12,13 @@ import pandas as pd
 from broker_alpaca import AlpacaBroker
 from config import et_now, load_config, parse_trade_date
 from execution import (
+    apply_margin_guard,
     augment_targets_with_flat_positions,
     build_order_plan,
     estimate_traded_notional,
     estimate_turnover,
     execute_order_plan,
+    extract_rejected_symbols,
     extract_rejected_short_symbols,
     merge_event_frames,
 )
@@ -289,60 +291,114 @@ def run_rebalance(args: argparse.Namespace) -> int:
             gross_exposure=cfg.gross_exposure,
             shortable_map=shortable_map,
         )
-        core_targets = build.targets
-        effective_targets = augment_targets_with_flat_positions(core_targets, positions_pre)
-        tracker.log_targets(run_id=run_id, targets=effective_targets, target_stage="initial")
-        price_map = broker.get_latest_price_map(effective_targets["symbol"].tolist())
+        final_core_targets = build.targets.copy()
+        final_effective_targets = pd.DataFrame()
+        events_all: list[pd.DataFrame] = []
+        retry_summaries: list[dict[str, object]] = []
+        margin_guard_passes: list[dict[str, object]] = []
+        all_rejected_shorts: set[str] = set()
+        unresolved_rejected_symbols: list[str] = []
+        max_passes = max(1, int(cfg.max_retry_passes))
 
-        order_plan_1 = build_order_plan(
-            effective_targets,
-            positions_pre,
-            min_order_notional=cfg.min_order_notional,
-            price_map=price_map,
-        )
-        events_1 = execute_order_plan(
-            broker,
-            order_plan_1,
-            run_id=run_id,
-            pass_num=1,
-            dry_run=args.dry_run,
-        )
-        events_all: list[pd.DataFrame] = [events_1]
-
-        rejected_shorts = extract_rejected_short_symbols(events_1)
-        final_core_targets = core_targets.copy()
-        final_effective_targets = effective_targets.copy()
-        if rejected_shorts:
-            final_core_targets = drop_rejected_shorts_and_reneutralize(
-                core_targets,
-                rejected_shorts,
-                short_gross_target=cfg.short_gross_target,
-            )
-            positions_mid = broker.list_positions() if not args.dry_run else positions_pre
+        positions_for_pass = positions_pre.copy()
+        account_for_pass = dict(account_pre)
+        for pass_num in range(1, max_passes + 1):
             final_effective_targets = augment_targets_with_flat_positions(
                 final_core_targets,
-                positions_mid,
+                positions_for_pass,
             )
+            target_stage = "initial" if pass_num == 1 else f"retry_{pass_num}"
             tracker.log_targets(
                 run_id=run_id,
                 targets=final_effective_targets,
-                target_stage="corrective",
+                target_stage=target_stage,
             )
-            price_map_mid = broker.get_latest_price_map(final_effective_targets["symbol"].tolist())
-            order_plan_2 = build_order_plan(
+
+            if final_effective_targets.empty:
+                retry_summaries.append(
+                    {
+                        "pass_num": pass_num,
+                        "result": "no_targets",
+                        "rejected_symbols": [],
+                        "rejected_shorts": [],
+                    }
+                )
+                break
+
+            symbols_for_prices = final_effective_targets["symbol"].tolist()
+            price_map = broker.get_latest_price_map(symbols_for_prices)
+            order_plan = build_order_plan(
                 final_effective_targets,
-                positions_mid,
+                positions_for_pass,
                 min_order_notional=cfg.min_order_notional,
-                price_map=price_map_mid,
+                price_map=price_map,
             )
-            events_2 = execute_order_plan(
+            order_plan, margin_guard = apply_margin_guard(
+                order_plan,
+                buying_power=float(account_for_pass.get("buying_power", 0.0)),
+                bp_utilization=cfg.bp_utilization,
+                margin_buffer_notional=cfg.margin_buffer_notional,
+                min_order_notional=cfg.min_order_notional,
+                price_map=price_map,
+            )
+            margin_guard_passes.append(
+                {
+                    "pass_num": pass_num,
+                    "orders_after_guard": int(len(order_plan)),
+                    **margin_guard,
+                }
+            )
+
+            if order_plan.empty:
+                retry_summaries.append(
+                    {
+                        "pass_num": pass_num,
+                        "result": "no_orders",
+                        "rejected_symbols": [],
+                        "rejected_shorts": [],
+                    }
+                )
+                break
+
+            events_pass = execute_order_plan(
                 broker,
-                order_plan_2,
+                order_plan,
                 run_id=run_id,
-                pass_num=2,
+                pass_num=pass_num,
                 dry_run=args.dry_run,
             )
-            events_all.append(events_2)
+            events_all.append(events_pass)
+
+            rejected_symbols = extract_rejected_symbols(events_pass)
+            rejected_shorts = extract_rejected_short_symbols(events_pass)
+            all_rejected_shorts.update(rejected_shorts)
+            retry_summaries.append(
+                {
+                    "pass_num": pass_num,
+                    "result": "ok" if not rejected_symbols else "retries_needed",
+                    "submitted_orders": int(len(events_pass)),
+                    "rejected_symbols": rejected_symbols,
+                    "rejected_shorts": rejected_shorts,
+                }
+            )
+
+            if not rejected_symbols:
+                break
+
+            if pass_num >= max_passes:
+                unresolved_rejected_symbols = rejected_symbols
+                break
+
+            if rejected_shorts:
+                final_core_targets = drop_rejected_shorts_and_reneutralize(
+                    final_core_targets,
+                    rejected_shorts,
+                    short_gross_target=cfg.short_gross_target,
+                )
+
+            if not args.dry_run:
+                positions_for_pass = broker.list_positions()
+                account_for_pass = broker.get_account_snapshot()
 
         events = merge_event_frames(events_all)
         tracker.log_order_events(events)
@@ -413,15 +469,25 @@ def run_rebalance(args: argparse.Namespace) -> int:
         )
         flatten_symbols = sorted(flatten_symbols)
         status = "dry_run_success" if args.dry_run else "success"
+        if (not args.dry_run) and unresolved_rejected_symbols:
+            status = "success_with_rejects"
+        margin_guard_pass1 = margin_guard_passes[0] if len(margin_guard_passes) >= 1 else None
+        margin_guard_pass2 = margin_guard_passes[1] if len(margin_guard_passes) >= 2 else None
         reason_payload = {
             "stats": build.stats,
             "filtered_short_symbols": build.filtered_short_symbols,
-            "rejected_shorts": rejected_shorts,
+            "rejected_shorts": sorted(all_rejected_shorts),
+            "unresolved_rejected_symbols": unresolved_rejected_symbols,
+            "max_retry_passes": max_passes,
+            "retry_passes": retry_summaries,
             "flatten_symbols_count": len(flatten_symbols),
             "flatten_symbols_sample": flatten_symbols[:20],
             "core_target_exposure": core_exposure,
             "effective_target_exposure": effective_exposure,
             "target_exposure": effective_exposure,
+            "margin_guard_passes": margin_guard_passes,
+            "margin_guard_pass1": margin_guard_pass1,
+            "margin_guard_pass2": margin_guard_pass2,
             "traded_notional": traded_notional,
         }
         tracker.update_run_finish(

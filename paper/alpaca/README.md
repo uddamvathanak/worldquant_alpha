@@ -133,9 +133,14 @@ Default behavior:
 - Long/short selection: top/bottom N (default 30 each)
 - Gross exposure: 80% total (40% long, 40% short)
 - Neutralization: dollar-neutral + sector-matched book
+- Margin guard: pre-trade incremental exposure is capped by
+  `buying_power * ALPACA_BP_UTILIZATION - ALPACA_MARGIN_BUFFER_NOTIONAL`.
+- Execution order priority: de-risking/flattening orders are sent before new risk-open orders.
 - Strict target match: symbols held but missing from today target are added as synthetic `flat` targets and closed.
 - Short execution: whole-share `qty` market orders (avoids Alpaca fractional short restriction)
-- Short reject policy: drop rejected shorts and run one corrective pass that re-neutralizes both sides.
+- Reject retry policy: runner retries up to `ALPACA_MAX_RETRY_PASSES` total passes.
+- Short reject correction: rejected short symbols are dropped from target and both sides are re-neutralized before retry.
+- If rejections remain after max retries, run is marked `success_with_rejects` and unresolved symbols are logged.
 - Kill switch: skip new entries if prior daily return <= -2%
 - Skip-day semantics: skip statuses hold positions; no forced flatten.
 - Cost model: 5 bps round-trip for proxy metric accounting

@@ -145,7 +145,14 @@ def build_order_plan(
             keep_mask = (~is_short_target) | (order_qty_series >= 1)
             plan = plan[keep_mask].copy()
 
-    plan = plan.sort_values("order_notional", ascending=False).reset_index(drop=True)
+    # Execute de-risking/flattening orders first so buying power is freed before opening new risk.
+    plan["_reduces_abs_exposure"] = (
+        plan["target_notional"].abs() <= (plan["current_notional"].abs() + 1e-9)
+    )
+    plan = plan.sort_values(
+        ["_reduces_abs_exposure", "order_notional"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
     plan = plan.rename(columns={"side": "target_side"})
     cols = [
         "symbol",
@@ -161,6 +168,114 @@ def build_order_plan(
         "order_qty",
     ]
     return plan[cols]
+
+
+def apply_margin_guard(
+    order_plan: pd.DataFrame,
+    *,
+    buying_power: float,
+    bp_utilization: float,
+    margin_buffer_notional: float,
+    min_order_notional: float,
+    price_map: dict[str, float] | None = None,
+) -> tuple[pd.DataFrame, dict[str, float | int]]:
+    summary: dict[str, float | int] = {
+        "buying_power": float(max(buying_power, 0.0)),
+        "bp_utilization": float(max(min(bp_utilization, 1.0), 0.0)),
+        "margin_buffer_notional": float(max(margin_buffer_notional, 0.0)),
+        "requested_incremental_notional": 0.0,
+        "available_incremental_notional": 0.0,
+        "post_guard_incremental_notional": 0.0,
+        "scale_applied": 1.0,
+        "trimmed_orders": 0,
+    }
+    if order_plan is None or order_plan.empty:
+        return order_plan, summary
+
+    plan = order_plan.copy()
+    base_cols = list(plan.columns)
+    safe_buying_power = float(
+        max(
+            0.0,
+            float(summary["buying_power"]) * float(summary["bp_utilization"])
+            - float(summary["margin_buffer_notional"]),
+        )
+    )
+    summary["available_incremental_notional"] = safe_buying_power
+
+    abs_current = plan["current_notional"].astype(float).abs()
+    abs_target = plan["target_notional"].astype(float).abs()
+    plan["_margin_increase"] = (abs_target - abs_current).clip(lower=0.0)
+    requested_incremental = float(plan["_margin_increase"].sum())
+    summary["requested_incremental_notional"] = requested_incremental
+
+    if requested_incremental <= safe_buying_power + 1e-9:
+        summary["post_guard_incremental_notional"] = requested_incremental
+        return plan[base_cols], summary
+
+    scale = 0.0 if safe_buying_power <= 0 else float(safe_buying_power / requested_incremental)
+    summary["scale_applied"] = scale
+
+    inc_mask = plan["_margin_increase"] > 0.0
+    if inc_mask.any():
+        plan.loc[inc_mask, "delta_notional"] = (
+            plan.loc[inc_mask, "delta_notional"].astype(float) * scale
+        )
+        plan.loc[inc_mask, "target_notional"] = (
+            plan.loc[inc_mask, "current_notional"].astype(float)
+            + plan.loc[inc_mask, "delta_notional"].astype(float)
+        )
+        plan.loc[inc_mask, "target_weight"] = plan.loc[inc_mask, "target_weight"].astype(float) * scale
+        plan.loc[inc_mask, "order_notional"] = plan.loc[inc_mask, "delta_notional"].astype(float).abs()
+        plan.loc[inc_mask, "order_side"] = plan.loc[inc_mask, "delta_notional"].map(
+            lambda v: "buy" if float(v) > 0 else "sell"
+        )
+
+    if price_map:
+        short_mask = plan["target_side"] == "short"
+        if short_mask.any():
+            short_prices = plan.loc[short_mask, "symbol"].map(
+                lambda s: float(price_map.get(str(s).upper(), 0.0))
+            )
+            qty_values = (
+                plan.loc[short_mask, "order_notional"]
+                .astype(float)
+                .div(short_prices.replace(0.0, pd.NA))
+                .fillna(0.0)
+                .map(lambda x: int(x) if x >= 1 else 0)
+            )
+            plan.loc[short_mask, "order_qty"] = qty_values
+
+    before_filter = len(plan)
+    keep_mask = (plan["order_notional"].astype(float) >= float(min_order_notional)) | (
+        plan["target_side"] == "flat"
+    )
+    plan = plan[keep_mask].copy()
+    if "order_qty" in plan.columns:
+        short_mask = plan["target_side"] == "short"
+        qty_series = pd.to_numeric(plan["order_qty"], errors="coerce").fillna(0).astype(int)
+        plan = plan[(~short_mask) | (qty_series >= 1)].copy()
+    summary["trimmed_orders"] = int(before_filter - len(plan))
+
+    post_incremental = float(
+        (
+            plan["target_notional"].astype(float).abs()
+            - plan["current_notional"].astype(float).abs()
+        )
+        .clip(lower=0.0)
+        .sum()
+    )
+    summary["post_guard_incremental_notional"] = post_incremental
+
+    plan["_reduces_abs_exposure"] = (
+        plan["target_notional"].abs() <= (plan["current_notional"].abs() + 1e-9)
+    )
+    plan = plan.sort_values(
+        ["_reduces_abs_exposure", "order_notional"],
+        ascending=[False, False],
+    ).drop(columns=["_margin_increase", "_reduces_abs_exposure"], errors="ignore")
+    plan = plan.reset_index(drop=True)
+    return plan[base_cols], summary
 
 
 def execute_order_plan(
@@ -254,14 +369,23 @@ def execute_order_plan(
 
 
 def extract_rejected_short_symbols(events: pd.DataFrame) -> list[str]:
+    return extract_rejected_symbols(events, target_side="short")
+
+
+def extract_rejected_symbols(
+    events: pd.DataFrame,
+    *,
+    target_side: str | None = None,
+) -> list[str]:
     if events.empty:
         return []
     rejected = events[
-        (events["target_side"] == "short")
-        & (
-            events["status"].astype(str).str.contains("reject|error", case=False, regex=True)
-        )
+        events["status"].astype(str).str.contains("reject|error", case=False, regex=True)
     ]
+    if target_side:
+        rejected = rejected[
+            rejected["target_side"].astype(str).str.lower() == target_side.lower()
+        ]
     symbols = rejected["symbol"].astype(str).str.upper().unique().tolist()
     return sorted(symbols)
 

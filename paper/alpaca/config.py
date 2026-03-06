@@ -65,6 +65,9 @@ class RunConfig:
     kill_switch_daily_return: float
     round_trip_cost_bps: float
     min_order_notional: float
+    bp_utilization: float
+    margin_buffer_notional: float
+    max_retry_passes: int
     scheduler_task_name: str
     scheduler_time_et: str
 
@@ -126,6 +129,9 @@ def load_config(base_dir: Path | None = None) -> RunConfig:
         kill_switch_daily_return=_read_float("ALPACA_KILL_SWITCH_DAILY_RETURN", -0.02),
         round_trip_cost_bps=_read_float("ALPACA_ROUND_TRIP_COST_BPS", 5.0),
         min_order_notional=_read_float("ALPACA_MIN_ORDER_NOTIONAL", 50.0),
+        bp_utilization=_read_float("ALPACA_BP_UTILIZATION", 0.90),
+        margin_buffer_notional=_read_float("ALPACA_MARGIN_BUFFER_NOTIONAL", 0.0),
+        max_retry_passes=_read_int("ALPACA_MAX_RETRY_PASSES", 3),
         scheduler_task_name=os.getenv(
             "ALPACA_SCHEDULER_TASK_NAME",
             "WQA_Alpaca_Rebalance_0935ET",
@@ -136,4 +142,3 @@ def load_config(base_dir: Path | None = None) -> RunConfig:
     )
     cfg.ensure_runtime_dirs()
     return cfg
-

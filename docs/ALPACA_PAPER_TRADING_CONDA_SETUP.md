@@ -34,6 +34,9 @@ Copy `paper/alpaca/.env.example` to `paper/alpaca/.env` and fill in values:
 APCA_API_KEY_ID=your_paper_key
 APCA_API_SECRET_KEY=your_paper_secret
 APCA_API_BASE_URL=https://paper-api.alpaca.markets
+ALPACA_BP_UTILIZATION=0.90
+ALPACA_MARGIN_BUFFER_NOTIONAL=0
+ALPACA_MAX_RETRY_PASSES=3
 ```
 
 Notes:
@@ -111,7 +114,9 @@ conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --dry-run
 
 Rebalance behavior notes:
 - strict target-match: dropped symbols are flattened via synthetic `flat` targets.
-- reject correction: if shorts are rejected, runner does a corrective pass that re-neutralizes both sides.
+- reject handling: runner retries rejected orders up to `ALPACA_MAX_RETRY_PASSES` total passes.
+- reject correction: if shorts are rejected, runner drops those symbols and re-neutralizes both sides before retry.
+- hard margin guard: runner caps incremental risk-open notional using buying power before submission.
 - skip statuses hold positions (no auto-flatten).
 
 Run a specific date:
@@ -198,7 +203,7 @@ Useful option:
 
 - Add a hard kill switch by max daily drawdown.
 - Add notional and symbol concentration limits.
-- Add retry logic with idempotency around order submission.
+- Keep `ALPACA_MAX_RETRY_PASSES` finite and review unresolved rejects in run logs.
 - Record every order and fill locally for audit.
 - Run a scheduled heartbeat check for connectivity.
 - Keep short orders in whole-share qty mode (fractional short sell is rejected by Alpaca).
