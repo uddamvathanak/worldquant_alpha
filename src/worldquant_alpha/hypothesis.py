@@ -39,6 +39,9 @@ class HypothesisStore:
         if not self.path.exists():
             self.path.write_text("", encoding="utf-8")
 
+    def _read_lines(self) -> list[str]:
+        return self.path.read_text(encoding="utf-8-sig").splitlines()
+
     def create(
         self,
         title: str,
@@ -75,7 +78,7 @@ class HypothesisStore:
 
     def list(self) -> list[Hypothesis]:
         hypotheses: list[Hypothesis] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        for line in self._read_lines():
             if not line.strip():
                 continue
             payload = json.loads(line)
@@ -102,7 +105,7 @@ class HypothesisStore:
 
         payloads: list[dict[str, object]] = []
         target: dict[str, object] | None = None
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        for line in self._read_lines():
             if not line.strip():
                 continue
             payload = json.loads(line)

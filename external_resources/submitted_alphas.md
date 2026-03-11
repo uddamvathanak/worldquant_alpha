@@ -232,3 +232,13 @@ rel_days_since_max = rank(ts_arg_max(close, 30));
 decline_pct = (vwap - close) / close;
 decline_pct / min( ts_decay_linear(rel_days_since_max, decay_days), 0.20)
 ```
+
+USA, TOP3000, Decay 0, Delay 1, Truncation 0.05, Neutralization None\
+Sharpe 1.95, Turnover 23.11%, Fitness 2.02, Returns 24.78%, Drawdown 7.83%, Margin 21.44bp\
+NaN Handling: key improvement (tuned)
+```
+profit = group_rank(fnd2_ebitdm, industry) + group_rank(fnd2_ebitfr, industry);
+asset = group_rank(fn_assets_fair_val_a, industry);
+mom20 = group_rank(ts_mean(returns, 5), industry);
+alpha = asset > 0.5 ? profit - mom20 : 0;
+```

@@ -26,3 +26,17 @@ def test_create_and_update_hypothesis_annotations(tmp_path: Path) -> None:
     assert updated.behavioral_mechanism == "Flow pressure mean reverts"
     assert updated.risk_hypothesis == "Momentum regime risk"
     assert updated.failure_modes == "Trend shock days"
+
+
+def test_list_handles_utf8_bom_prefixed_registry(tmp_path: Path) -> None:
+    path = tmp_path / "hypotheses.jsonl"
+    path.write_text(
+        '{"hypothesis_id":"abc123def456","title":"Test","rationale":"Base","expression":"rank(vwap/close)","created_at":"2026-03-10T00:00:00+00:00"}\n',
+        encoding="utf-8-sig",
+    )
+
+    store = HypothesisStore(path)
+    items = store.list()
+
+    assert len(items) == 1
+    assert items[0].hypothesis_id == "abc123def456"
