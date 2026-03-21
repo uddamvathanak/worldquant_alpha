@@ -84,7 +84,17 @@ def select_long_short_candidates(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if top_n <= 0:
         raise ValueError("top_n must be positive")
-    longs = signals.nlargest(top_n, "score").copy()
-    shorts = signals.nsmallest(top_n, "score").copy()
-    return longs.reset_index(drop=True), shorts.reset_index(drop=True)
 
+    ranked = signals.copy()
+    ranked["symbol"] = ranked["symbol"].astype(str).str.strip().str.upper()
+    ranked["score"] = pd.to_numeric(ranked["score"], errors="coerce")
+    ranked = ranked.dropna(subset=["symbol", "score"]).drop_duplicates(
+        subset=["symbol"],
+        keep="first",
+    )
+
+    longs = ranked.sort_values(["score", "symbol"], ascending=[False, True]).head(top_n).copy()
+    excluded = set(longs["symbol"].tolist())
+    short_pool = ranked[~ranked["symbol"].isin(excluded)].copy()
+    shorts = short_pool.sort_values(["score", "symbol"], ascending=[True, True]).head(top_n).copy()
+    return longs.reset_index(drop=True), shorts.reset_index(drop=True)

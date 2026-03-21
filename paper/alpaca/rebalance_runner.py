@@ -9,6 +9,7 @@ import uuid
 
 import pandas as pd
 
+from alpha_registry import load_strategy_spec
 from broker_alpaca import AlpacaBroker
 from config import et_now, load_config, parse_trade_date
 from execution import (
@@ -178,10 +179,29 @@ def _build_daily_metric_record(
 def run_rebalance(args: argparse.Namespace) -> int:
     cfg = load_config()
 
+    strategy_file = (
+        Path(getattr(args, "strategy_file", "")).resolve()
+        if getattr(args, "strategy_file", "")
+        else cfg.selected_strategy_file
+    )
+    if strategy_file.exists():
+        try:
+            strategy = load_strategy_spec(strategy_file, require_approved=True)
+            if args.top_n is None:
+                args.top_n = strategy.top_n
+            if args.gross_exposure is None:
+                args.gross_exposure = strategy.gross_exposure
+            if not getattr(args, "book_mode", ""):
+                args.book_mode = strategy.book_mode
+        except Exception:
+            pass
+
     if args.top_n is not None:
         cfg.top_n = int(args.top_n)
     if args.gross_exposure is not None:
         cfg.gross_exposure = float(args.gross_exposure)
+    if getattr(args, "book_mode", ""):
+        cfg.book_mode = str(args.book_mode).strip().lower()
     if args.db_path:
         cfg.db_path = Path(args.db_path).resolve()
     if args.logs_dir:
@@ -289,6 +309,7 @@ def run_rebalance(args: argparse.Namespace) -> int:
             equity=float(account_pre.get("equity", 0.0)),
             top_n=cfg.top_n,
             gross_exposure=cfg.gross_exposure,
+            book_mode=cfg.book_mode,
             shortable_map=shortable_map,
         )
         final_core_targets = build.targets.copy()
@@ -508,11 +529,16 @@ def run_rebalance(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Daily Alpaca paper rebalance runner (sector-neutral long/short)."
+        description="Daily Alpaca paper rebalance runner."
     )
     parser.add_argument("--date", default="", help="Trade date in YYYY-MM-DD (ET).")
     parser.add_argument("--signal-file", default="", help="Override signal CSV path.")
     parser.add_argument("--signals-dir", default="", help="Override signals directory.")
+    parser.add_argument(
+        "--strategy-file",
+        default="",
+        help="Promoted selected strategy JSON path for runtime defaults.",
+    )
     parser.add_argument("--db-path", default="", help="Override SQLite path.")
     parser.add_argument("--logs-dir", default="", help="Override CSV logs directory.")
     parser.add_argument("--top-n", type=int, default=None, help="Names per side.")
@@ -521,6 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Total gross exposure (e.g. 0.80).",
+    )
+    parser.add_argument(
+        "--book-mode",
+        choices=["sector", "none"],
+        default="",
+        help="Portfolio construction mode: sector-matched or raw balanced book.",
     )
     parser.add_argument(
         "--dry-run",

@@ -345,6 +345,7 @@ class AlpacaBroker:
         timeframe: str = "1Day",
         adjustment: str = "raw",
         limit: int = 1000,
+        feed: str = "",
     ) -> pd.DataFrame:
         symbols = [str(s).strip().upper() for s in symbols if str(s).strip()]
         symbols = sorted(set(symbols))
@@ -353,7 +354,7 @@ class AlpacaBroker:
                 columns=["symbol", "t", "o", "h", "l", "c", "v", "vw", "n"]
             )
 
-        feed = os.getenv("APCA_DATA_FEED", "iex").strip() or "iex"
+        data_feed = str(feed).strip() or os.getenv("APCA_DATA_FEED", "iex").strip() or "iex"
         headers = {
             "APCA-API-KEY-ID": self.api_key,
             "APCA-API-SECRET-KEY": self.api_secret,
@@ -373,7 +374,7 @@ class AlpacaBroker:
                     "end": end.isoformat(),
                     "adjustment": adjustment,
                     "limit": int(limit),
-                    "feed": feed,
+                    "feed": data_feed,
                 }
                 if page_token:
                     params["page_token"] = page_token

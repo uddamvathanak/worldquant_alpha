@@ -69,14 +69,32 @@ def _assign_uniform_sector_weights(
     return long_book, short_book
 
 
+def _pick_unmatched_books(
+    longs: pd.DataFrame,
+    shorts: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    balanced_n = min(len(longs), len(shorts))
+    if balanced_n <= 0:
+        return pd.DataFrame(), pd.DataFrame()
+
+    long_book = longs.sort_values("score", ascending=False).head(balanced_n).copy()
+    short_book = shorts.sort_values("score", ascending=True).head(balanced_n).copy()
+    return long_book, short_book
+
+
 def build_sector_neutral_targets(
     signals: pd.DataFrame,
     *,
     equity: float,
     top_n: int,
     gross_exposure: float,
+    book_mode: str = "sector",
     shortable_map: dict[str, bool] | None = None,
 ) -> BuildResult:
+    book_mode_norm = str(book_mode).strip().lower() or "sector"
+    if book_mode_norm not in {"sector", "none"}:
+        raise ValueError(f"Unsupported book_mode: {book_mode}")
+
     longs, shorts = select_long_short_candidates(signals, top_n=top_n)
 
     filtered_short_symbols: list[str] = []
@@ -88,13 +106,17 @@ def build_sector_neutral_targets(
     long_gross = gross_exposure / 2.0
     short_gross = gross_exposure / 2.0
 
-    long_book, short_book, matched_counts = _pick_sector_matched_books(longs, shorts)
+    if book_mode_norm == "sector":
+        long_book, short_book, matched_counts = _pick_sector_matched_books(longs, shorts)
+    else:
+        long_book, short_book = _pick_unmatched_books(longs, shorts)
+        matched_counts = {}
 
     fallback_used = False
     if long_book.empty or short_book.empty:
         fallback_used = True
-        balanced_n = min(len(longs), len(shorts))
-        if balanced_n <= 0:
+        long_book, short_book = _pick_unmatched_books(longs, shorts)
+        if long_book.empty or short_book.empty:
             targets = pd.DataFrame(
                 columns=[
                     "symbol",
@@ -112,6 +134,7 @@ def build_sector_neutral_targets(
                 "long_gross_target": long_gross,
                 "short_gross_target": short_gross,
                 "net_target": 0.0,
+                "book_mode": book_mode_norm,
                 "fallback_used": True,
             }
             return BuildResult(
@@ -119,8 +142,6 @@ def build_sector_neutral_targets(
                 stats=stats,
                 filtered_short_symbols=filtered_short_symbols,
             )
-        long_book = longs.sort_values("score", ascending=False).head(balanced_n).copy()
-        short_book = shorts.sort_values("score", ascending=True).head(balanced_n).copy()
         matched_counts = {}
 
     long_book, short_book = _assign_uniform_sector_weights(
@@ -149,6 +170,7 @@ def build_sector_neutral_targets(
             -targets.loc[targets["side"] == "short", "target_weight"].sum()
         ),
         "net_target": float(targets["target_weight"].sum()),
+        "book_mode": book_mode_norm,
         "fallback_used": fallback_used,
     }
     return BuildResult(

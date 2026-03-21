@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from alpha_registry import MODEL_RESEARCH_SELECTED, load_strategy_spec
+from config import load_config
 from config import et_now
 from rebalance_runner import run_rebalance
-from signal_generator import run_signal_generation
+from signal_generator import MODEL_CHOICES, run_signal_generation
 from universe_builder import run_universe_build
 
 
@@ -36,6 +38,27 @@ def _is_within_et_window(target_hhmm: str, *, window_minutes: int) -> bool:
 
 
 def run_daily_pipeline(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    strategy_file = (
+        Path(args.strategy_file).resolve()
+        if getattr(args, "strategy_file", "")
+        else cfg.selected_strategy_file
+    )
+    if args.model is None and strategy_file.exists():
+        try:
+            strategy = load_strategy_spec(strategy_file, require_approved=True)
+            args.model = MODEL_RESEARCH_SELECTED
+            if args.book_mode == "":
+                args.book_mode = strategy.book_mode
+            if args.top_n is None:
+                args.top_n = strategy.top_n
+            if args.gross_exposure is None:
+                args.gross_exposure = strategy.gross_exposure
+            if args.group_level == "auto":
+                args.group_level = strategy.group_level
+        except Exception:
+            pass
+
     signal_file = args.signal_file.strip()
 
     if args.enforce_et_window and not args.date:
@@ -46,10 +69,12 @@ def run_daily_pipeline(args: argparse.Namespace) -> int:
                 date=args.date,
                 signal_file=signal_file,
                 signals_dir=args.signals_dir,
+                strategy_file=args.strategy_file,
                 db_path=args.db_path,
                 logs_dir=args.logs_dir,
                 top_n=args.top_n,
                 gross_exposure=args.gross_exposure,
+                book_mode=args.book_mode,
                 dry_run=args.dry_run,
                 enforce_et_window=args.enforce_et_window,
                 et_target_time=args.et_target_time,
@@ -83,8 +108,16 @@ def run_daily_pipeline(args: argparse.Namespace) -> int:
             output_file=args.output_file,
             universe_file=args.universe_file,
             sector_map_file=args.sector_map_file,
+            fundamentals_file=args.fundamentals_file,
+            classifications_file=args.classifications_file,
+            strategy_file=args.strategy_file,
+            model=args.model,
+            group_level=args.group_level,
             lookback_days=args.lookback_days,
             smoothing=args.smoothing,
+            top_n=args.top_n,
+            signal_decay=args.signal_decay,
+            score_truncation=args.score_truncation,
         )
         generated_path = run_signal_generation(sg_args)
         signal_file = str(generated_path)
@@ -95,10 +128,12 @@ def run_daily_pipeline(args: argparse.Namespace) -> int:
         date=args.date,
         signal_file=signal_file,
         signals_dir=args.signals_dir,
+        strategy_file=args.strategy_file,
         db_path=args.db_path,
         logs_dir=args.logs_dir,
         top_n=args.top_n,
         gross_exposure=args.gross_exposure,
+        book_mode=args.book_mode,
         dry_run=args.dry_run,
         enforce_et_window=args.enforce_et_window,
         et_target_time=args.et_target_time,
@@ -191,6 +226,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional sector map CSV with columns symbol,sector.",
     )
     parser.add_argument(
+        "--fundamentals-file",
+        default="",
+        help="Reference fundamentals CSV path for fundamental models.",
+    )
+    parser.add_argument(
+        "--classifications-file",
+        default="",
+        help="Reference classifications CSV path for fundamental models.",
+    )
+    parser.add_argument(
+        "--strategy-file",
+        default="",
+        help="Promoted selected strategy JSON path for daily runtime.",
+    )
+    parser.add_argument(
+        "--model",
+        choices=MODEL_CHOICES,
+        default=None,
+        help="Signal model to generate. Defaults to ALPACA_SIGNAL_MODEL from .env.",
+    )
+    parser.add_argument(
+        "--group-level",
+        choices=["industry", "sector", "auto", "market"],
+        default="auto",
+        help="Grouping level for proxy and research price/volume models.",
+    )
+    parser.add_argument(
+        "--signal-decay",
+        type=int,
+        default=0,
+        help="Linear score decay window for research models.",
+    )
+    parser.add_argument(
+        "--score-truncation",
+        default="",
+        help="Optional absolute score contribution cap for research models (e.g. 0.05).",
+    )
+    parser.add_argument(
         "--lookback-days",
         type=int,
         default=60,
@@ -212,6 +285,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Total gross exposure (e.g. 0.80).",
+    )
+    parser.add_argument(
+        "--book-mode",
+        choices=["sector", "none"],
+        default="",
+        help="Portfolio construction mode used by the rebalance stage.",
     )
     parser.add_argument(
         "--dry-run",

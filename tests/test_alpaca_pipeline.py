@@ -12,6 +12,7 @@ ALPACA_DIR = Path(__file__).resolve().parents[1] / "paper" / "alpaca"
 if str(ALPACA_DIR) not in sys.path:
     sys.path.insert(0, str(ALPACA_DIR))
 
+from alpha_registry import StrategyMember, StrategySpec, write_strategy_spec  # type: ignore  # noqa: E402
 from execution import (  # type: ignore  # noqa: E402
     apply_margin_guard,
     augment_targets_with_flat_positions,
@@ -20,13 +21,18 @@ from execution import (  # type: ignore  # noqa: E402
     extract_rejected_symbols,
     extract_rejected_short_symbols,
 )
+import daily_pipeline  # type: ignore  # noqa: E402
 from monthly_eval import compute_proxy_metrics  # type: ignore  # noqa: E402
 from portfolio_builder import (  # type: ignore  # noqa: E402
     build_sector_neutral_targets,
     drop_rejected_shorts_and_reneutralize,
     portfolio_exposure,
 )
-from signal_loader import SignalValidationError, validate_signal_frame  # type: ignore  # noqa: E402
+from signal_loader import (  # type: ignore  # noqa: E402
+    SignalValidationError,
+    select_long_short_candidates,
+    validate_signal_frame,
+)
 
 
 def test_signal_validation_missing_columns_and_duplicates() -> None:
@@ -109,6 +115,46 @@ def test_portfolio_builder_sector_neutral_exposure() -> None:
     long_sectors = set(targets.loc[targets["side"] == "long", "sector"])
     short_sectors = set(targets.loc[targets["side"] == "short", "sector"])
     assert long_sectors == short_sectors
+
+
+def test_portfolio_builder_none_book_mode_uses_raw_balanced_selection() -> None:
+    signals = pd.DataFrame(
+        {
+            "symbol": ["L1", "L2", "L3", "S1", "S2", "S3"],
+            "score": [0.9, 0.8, 0.7, -0.9, -0.8, -0.7],
+            "sector": ["Tech", "Health", "Utilities", "Tech", "Tech", "Health"],
+        }
+    )
+    shortable = {symbol: True for symbol in signals["symbol"]}
+    built = build_sector_neutral_targets(
+        signals,
+        equity=100_000.0,
+        top_n=3,
+        gross_exposure=0.80,
+        book_mode="none",
+        shortable_map=shortable,
+    )
+
+    targets = built.targets
+    assert built.stats["book_mode"] == "none"
+    assert targets[targets["side"] == "long"]["symbol"].tolist() == ["L1", "L2", "L3"]
+    assert targets[targets["side"] == "short"]["symbol"].tolist() == ["S1", "S2", "S3"]
+    assert pytest.approx(float(targets["target_weight"].sum()), abs=1e-9) == 0.0
+
+
+def test_long_short_candidate_selection_avoids_overlap_on_ties() -> None:
+    signals = pd.DataFrame(
+        {
+            "symbol": ["AAA", "BBB", "CCC", "DDD"],
+            "score": [0.0, 0.0, 0.0, 0.0],
+            "sector": ["Tech", "Tech", "Health", "Health"],
+        }
+    )
+
+    longs, shorts = select_long_short_candidates(signals, top_n=2)
+    assert set(longs["symbol"]) == {"AAA", "BBB"}
+    assert set(shorts["symbol"]) == {"CCC", "DDD"}
+    assert set(longs["symbol"]).isdisjoint(set(shorts["symbol"]))
 
 
 class _DummyBroker:
@@ -432,3 +478,139 @@ def test_monthly_proxy_metrics_positive_series() -> None:
     assert summary["fitness_proxy"] > 0
     assert summary["returns"] > 0
     assert summary["max_drawdown"] == 0.0
+
+
+def test_daily_pipeline_passes_model_and_book_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_universe_build(args: object) -> int:
+        captured["universe_args"] = args
+        return 0
+
+    def fake_run_signal_generation(args: object) -> Path:
+        captured["signal_args"] = args
+        return Path("C:/tmp/generated_signal.csv")
+
+    def fake_run_rebalance(args: object) -> int:
+        captured["rebalance_args"] = args
+        return 0
+
+    monkeypatch.setattr(daily_pipeline, "run_universe_build", fake_run_universe_build)
+    monkeypatch.setattr(daily_pipeline, "run_signal_generation", fake_run_signal_generation)
+    monkeypatch.setattr(daily_pipeline, "run_rebalance", fake_run_rebalance)
+
+    args = daily_pipeline.build_parser().parse_args(
+        [
+            "--model",
+            "profit_asset_gate",
+            "--fundamentals-file",
+            "paper/alpaca/private/reference/fundamentals.csv",
+            "--classifications-file",
+            "paper/alpaca/private/reference/classifications.csv",
+            "--book-mode",
+            "none",
+            "--skip-universe-refresh",
+        ]
+    )
+    assert daily_pipeline.run_daily_pipeline(args) == 0
+
+    signal_args = captured["signal_args"]
+    rebalance_args = captured["rebalance_args"]
+    assert getattr(signal_args, "model") == "profit_asset_gate"
+    assert getattr(signal_args, "fundamentals_file").endswith("fundamentals.csv")
+    assert getattr(signal_args, "classifications_file").endswith("classifications.csv")
+    assert getattr(rebalance_args, "book_mode") == "none"
+
+
+def test_daily_pipeline_accepts_proxy_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_signal_generation(args: object) -> Path:
+        captured["signal_args"] = args
+        return Path("C:/tmp/generated_signal.csv")
+
+    def fake_run_rebalance(args: object) -> int:
+        captured["rebalance_args"] = args
+        return 0
+
+    monkeypatch.setattr(daily_pipeline, "run_signal_generation", fake_run_signal_generation)
+    monkeypatch.setattr(daily_pipeline, "run_rebalance", fake_run_rebalance)
+
+    args = daily_pipeline.build_parser().parse_args(
+        [
+            "--model",
+            "profit_asset_gate_proxy",
+            "--book-mode",
+            "none",
+            "--skip-universe-refresh",
+        ]
+    )
+    assert daily_pipeline.run_daily_pipeline(args) == 0
+
+    signal_args = captured["signal_args"]
+    rebalance_args = captured["rebalance_args"]
+    assert getattr(signal_args, "model") == "profit_asset_gate_proxy"
+    assert getattr(rebalance_args, "book_mode") == "none"
+
+
+def test_daily_pipeline_auto_uses_promoted_selected_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    strategy_path = tmp_path / "selected_strategy.json"
+    write_strategy_spec(
+        strategy_path,
+        StrategySpec(
+            strategy_type="single",
+            feed="sip",
+            gross_exposure=4.0,
+            book_mode="sector",
+            top_n=75,
+            group_level="market",
+            members=[
+                StrategyMember(
+                    name="rev_close_1d__market",
+                    alpha_name="rev_close_1d",
+                    family="short_reversion",
+                    weight=1.0,
+                    params={},
+                    group_level="market",
+                    book_mode="sector",
+                    top_n=75,
+                    signal_decay=3,
+                    score_truncation=0.05,
+                )
+            ],
+            approved=True,
+            source_run_id="20260319T101010Z",
+        ),
+    )
+
+    def fake_load_config() -> object:
+        class _Cfg:
+            selected_strategy_file = strategy_path
+
+        return _Cfg()
+
+    def fake_run_signal_generation(args: object) -> Path:
+        captured["signal_args"] = args
+        return Path("C:/tmp/generated_signal.csv")
+
+    def fake_run_rebalance(args: object) -> int:
+        captured["rebalance_args"] = args
+        return 0
+
+    monkeypatch.setattr(daily_pipeline, "load_config", fake_load_config)
+    monkeypatch.setattr(daily_pipeline, "run_signal_generation", fake_run_signal_generation)
+    monkeypatch.setattr(daily_pipeline, "run_rebalance", fake_run_rebalance)
+
+    args = daily_pipeline.build_parser().parse_args(["--skip-universe-refresh"])
+    assert daily_pipeline.run_daily_pipeline(args) == 0
+
+    signal_args = captured["signal_args"]
+    rebalance_args = captured["rebalance_args"]
+    assert getattr(signal_args, "model") == "research_selected"
+    assert getattr(signal_args, "group_level") == "market"
+    assert getattr(rebalance_args, "book_mode") == "sector"
+    assert getattr(rebalance_args, "top_n") == 75

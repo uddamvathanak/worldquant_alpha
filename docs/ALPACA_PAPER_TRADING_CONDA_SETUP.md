@@ -18,7 +18,7 @@ Recommended:
 ```powershell
 pip install --upgrade pip
 pip install -e .[dev]
-pip install alpaca-py pandas numpy python-dotenv pydantic
+pip install alpaca-py pandas numpy python-dotenv pydantic pyarrow requests
 ```
 
 Optional utilities:
@@ -34,16 +34,40 @@ Copy `paper/alpaca/.env.example` to `paper/alpaca/.env` and fill in values:
 APCA_API_KEY_ID=your_paper_key
 APCA_API_SECRET_KEY=your_paper_secret
 APCA_API_BASE_URL=https://paper-api.alpaca.markets
+APCA_DATA_FEED=sip
+FMP_API_KEY=your_fmp_key
+ALPACA_CLASSIFICATION_SOURCE=fmp
+ALPACA_SIGNAL_MODEL=profit_asset_gate_proxy
+ALPACA_BOOK_MODE=sector
+ALPACA_GROSS_EXPOSURE=4.0
 ALPACA_BP_UTILIZATION=0.90
 ALPACA_MARGIN_BUFFER_NOTIONAL=0
 ALPACA_MAX_RETRY_PASSES=3
+ALPHA_SEARCH_BATCH_SIZE=10
+ALPHA_SEARCH_MAX_RUNTIME_MIN=480
+ALPHA_SEARCH_TASK_NAME=WQA_Alpaca_Research_2300
 ```
 
 Notes:
 - Use **paper** keys, not live keys.
+- `FMP_API_KEY` is required the first time you bootstrap cached classifications from FMP.
+- `APCA_DATA_FEED=sip` is recommended for historical bars and backtests. Latest snapshot pricing used during rebalancing may still fall back to Alpaca's best available feed.
 - Never commit `paper/alpaca/.env` to git.
 
-## 4) Minimal connectivity smoke test
+## 4) Bootstrap cached classifications
+
+Run the free FMP sync once before the proxy model or the backtester:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/classification_sync.py --snapshot-date 2026-03-17
+```
+
+This writes:
+- `paper/alpaca/private/reference/classifications_latest.csv`
+- `paper/alpaca/private/reference/classifications/YYYY-MM-DD.csv`
+- `paper/alpaca/private/reference/symbol_master.csv`
+
+## 5) Minimal connectivity smoke test
 
 Run the built-in smoke test:
 
@@ -53,7 +77,7 @@ python paper/alpaca/smoke_test.py
 
 Expected output includes account metadata (account number, status, buying power, equity).
 
-## 5) Public repo safety model
+## 6) Public repo safety model
 
 Do:
 - commit public-safe code and docs under `paper/alpaca/`
@@ -65,7 +89,7 @@ Do not:
 - commit private strategy details under `paper/alpaca/private/`
 - commit runtime logs/state/database/signal files
 
-## 6) Universe + signal pipeline options
+## 7) Universe + signal pipeline options
 
 You now have three modes:
 
@@ -93,14 +117,16 @@ Auto-universe defaults:
 Auto-generator expects:
 - `paper/alpaca/private/universe.csv` with a `symbol` column
 - optional `paper/alpaca/private/sector_map.csv` with columns `symbol,sector`
-- if sector map is missing, `sector=ALL` is used
+- cached classifications from `paper/alpaca/private/reference/classifications_latest.csv`
+- cached symbol master from `paper/alpaca/private/reference/symbol_master.csv`
 
-## 7) Daily run command
+## 8) Daily run command
 
 Recommended full pipeline (refresh universe + generate signal + rebalance):
 ```powershell
 conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py
 ```
+With the recommended `.env`, this defaults to `profit_asset_gate_proxy` with sector-matched construction and 4.0 total gross exposure.
 
 If you want to use a fixed universe file and skip refresh:
 ```powershell
@@ -124,7 +150,45 @@ Run a specific date:
 conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --date 2026-02-25
 ```
 
-## 8) Install Windows task scheduler job
+## 9) Backtest runner
+
+Run the historical proxy backtest with fixed 4y/1y/1y train-OOS-unseen splits:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/backtest_runner.py --end-date 2026-03-16 --feed iex --train-days 1008 --oos-days 252 --test-days 252
+```
+
+Outputs are written under:
+- `paper/alpaca/private/backtests/<run_stamp>/`
+
+## 10) Nightly search runner
+
+Start a new resumable nightly search run:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/search_runner.py --new-run
+```
+
+Resume the latest search batch:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/search_runner.py --resume
+```
+
+Inspect the latest search status:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/search_runner.py --status
+```
+
+Search outputs are written under:
+- `paper/alpaca/private/search_runs/<run_id>/`
+- best shadow artifact: `paper/alpaca/private/shadow_strategy.json`
+- cross-run candidate cache: `paper/alpaca/state/research_cache.db`
+
+The nightly search is shadow-only and does not overwrite `paper/alpaca/private/selected_strategy.json`.
+
+## 11) Install Windows task scheduler job
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File paper/alpaca/install_scheduler.ps1
@@ -155,7 +219,13 @@ Task defaults:
 
 If registration fails with `Access is denied`, open PowerShell as Administrator and rerun the installer.
 
-## 9) Month-end proxy evaluation
+Install the separate nightly research task:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File paper/alpaca/install_research_scheduler.ps1
+```
+
+## 12) Month-end proxy evaluation
 
 ```powershell
 conda run -n alpaca-paper python paper/alpaca/monthly_eval.py --month 2026-02
@@ -165,7 +235,7 @@ This writes:
 - `paper/alpaca/logs/summary_YYYY-MM.csv`
 - copy-ready `wqa log-result` command printed in terminal
 
-## 10) Manual emergency flatten command
+## 13) Manual emergency flatten command
 
 Preview close-all without placing orders:
 
@@ -182,8 +252,11 @@ conda run -n alpaca-paper python paper/alpaca/liquidate_all.py --yes
 Useful option:
 - add `--no-cancel-open-orders` to keep existing open orders untouched
 
-## 11) Suggested project layout for paper trading phase
+## 14) Suggested project layout for paper trading phase
 
+- `paper/alpaca/classification_sync.py`
+- `paper/alpaca/backtest_runner.py`
+- `paper/alpaca/search_runner.py`
 - `paper/alpaca/smoke_test.py`
 - `paper/alpaca/universe_builder.py`
 - `paper/alpaca/signal_generator.py`
@@ -192,6 +265,7 @@ Useful option:
 - `paper/alpaca/liquidate_all.py`
 - `paper/alpaca/monthly_eval.py`
 - `paper/alpaca/install_scheduler.ps1`
+- `paper/alpaca/install_research_scheduler.ps1`
 - `paper/alpaca/.env.example`
 - `paper/alpaca/signals/`
 - `paper/alpaca/logs/`
@@ -199,7 +273,7 @@ Useful option:
 - `paper/alpaca/tmp/`
 - `paper/alpaca/private/`
 
-## 12) Operational rules before running continuously
+## 15) Operational rules before running continuously
 
 - Add a hard kill switch by max daily drawdown.
 - Add notional and symbol concentration limits.
