@@ -44,6 +44,7 @@ BASE_MODEL_CHOICES = [
     MODEL_PROFIT_ASSET_GATE_PROXY,
     MODEL_RESEARCH_SELECTED,
 ]
+WEIGHTED_BOOK_MODES = {"sector_weighted", "none_weighted"}
 
 
 def list_signal_models() -> list[str]:
@@ -560,6 +561,15 @@ def _load_runtime_strategy(
     return strategy, path
 
 
+def _required_scored_symbols(*, top_n: int, book_mode: str, exact: bool = False) -> int:
+    book_mode_norm = str(book_mode).strip().lower()
+    if book_mode_norm in WEIGHTED_BOOK_MODES:
+        return 400 if exact else 200
+    if exact:
+        return max(200, 4 * int(top_n))
+    return max(50, 2 * int(top_n))
+
+
 def _resolve_requested_model(cfg: object, args: argparse.Namespace) -> str:
     explicit = getattr(args, "model", None)
     if explicit:
@@ -629,6 +639,7 @@ def run_signal_generation(args: argparse.Namespace) -> Path:
         lookback_days = max(180, lookback_days)
     start = trade_date - timedelta(days=lookback_days + 40)
     top_n = int(getattr(args, "top_n", None) or cfg.top_n)
+    runtime_book_mode = str(getattr(args, "book_mode", "") or cfg.book_mode).strip().lower() or cfg.book_mode
     classification_snapshot_path: Path | None = None
     selected_strategy, selected_strategy_file = _load_runtime_strategy(
         cfg,
@@ -690,7 +701,11 @@ def run_signal_generation(args: argparse.Namespace) -> Path:
             fundamentals=fundamentals,
             classifications=classifications,
             asof_date=data_asof_date,
-            min_scored_symbols=max(200, 4 * top_n),
+            min_scored_symbols=_required_scored_symbols(
+                top_n=top_n,
+                book_mode=runtime_book_mode,
+                exact=True,
+            ),
         )
         signal_frame = build_signal_frame(
             scores,
@@ -725,7 +740,11 @@ def run_signal_generation(args: argparse.Namespace) -> Path:
             profit_window=63,
             asset_window=63,
             mom_window=5,
-            min_scored_symbols=max(50, 2 * top_n),
+            min_scored_symbols=_required_scored_symbols(
+                top_n=top_n,
+                book_mode=runtime_book_mode,
+                exact=False,
+            ),
         )
         signal_frame = build_signal_frame(
             scores,
@@ -762,8 +781,13 @@ def run_signal_generation(args: argparse.Namespace) -> Path:
                 )
             selected_strategy = load_strategy_spec(selected_strategy_file, require_approved=True)
             runtime_group_level = selected_strategy.group_level
+            runtime_book_mode = selected_strategy.book_mode
 
-        required_count = max(50, 2 * top_n)
+        required_count = _required_scored_symbols(
+            top_n=top_n,
+            book_mode=runtime_book_mode,
+            exact=False,
+        )
         if model == MODEL_RESEARCH_SELECTED:
             member_panels: list[tuple[dict[str, object], pd.DataFrame]] = []
             member_diags: list[pd.DataFrame] = []
@@ -777,7 +801,11 @@ def run_signal_generation(args: argparse.Namespace) -> Path:
                     params=member.params,
                     signal_decay=member.signal_decay,
                     score_truncation=member.score_truncation,
-                    min_scored_symbols=max(50, 2 * int(member.top_n)),
+                    min_scored_symbols=_required_scored_symbols(
+                        top_n=int(member.top_n),
+                        book_mode=member.book_mode,
+                        exact=False,
+                    ),
                 )
                 if panel.empty:
                     continue
@@ -927,6 +955,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--score-truncation",
         default="",
         help="Optional absolute score contribution cap for research models (e.g. 0.05).",
+    )
+    parser.add_argument(
+        "--book-mode",
+        choices=["sector", "none", "sector_weighted", "none_weighted"],
+        default="",
+        help="Optional runtime book mode hint for weighted/full-book coverage requirements.",
     )
     parser.add_argument(
         "--lookback-days",

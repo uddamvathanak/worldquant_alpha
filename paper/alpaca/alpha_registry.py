@@ -130,6 +130,27 @@ def _build_registry() -> dict[str, AlphaDefinition]:
             parameter_grid={"window": [20, 42, 63]},
         ),
         AlphaDefinition(
+            name="skip_month_momentum",
+            family="literature_momentum",
+            formula_fn="skip_month_momentum",
+            default_params={"lookback": 126, "skip": 21},
+            parameter_grid={"lookback": [126, 189, 252], "skip": [21]},
+        ),
+        AlphaDefinition(
+            name="high_52w_proximity",
+            family="literature_momentum",
+            formula_fn="high_52w_proximity",
+            default_params={"window": 252},
+            parameter_grid={"window": [126, 189, 252]},
+        ),
+        AlphaDefinition(
+            name="low_volatility_defensive",
+            family="low_volatility",
+            formula_fn="low_volatility_defensive",
+            default_params={"window": 63},
+            parameter_grid={"window": [42, 63, 126]},
+        ),
+        AlphaDefinition(
             name="breakout_quality",
             family="momentum",
             formula_fn="breakout_quality",
@@ -177,6 +198,18 @@ def _build_registry() -> dict[str, AlphaDefinition]:
 
 
 ALPHA_REGISTRY = _build_registry()
+ALPHA_SET_ALIASES: dict[str, list[str]] = {
+    "literature_core": [
+        "skip_month_momentum",
+        "high_52w_proximity",
+        "low_volatility_defensive",
+        "smooth_momentum",
+        "breakout_quality",
+        "momentum_with_volume_confirm",
+        "vwap_gap_revert",
+        "profit_asset_gate_proxy_v1",
+    ]
+}
 
 
 def get_alpha_definition(name: str) -> AlphaDefinition:
@@ -198,12 +231,21 @@ def resolve_alpha_set(alpha_set: str | None) -> list[AlphaDefinition]:
     raw = str(alpha_set or DEFAULT_ALPHA_SET).strip()
     if not raw or raw.lower() == DEFAULT_ALPHA_SET:
         return [ALPHA_REGISTRY[name] for name in sorted(ALPHA_REGISTRY)]
+    alias_key = raw.lower()
+    if alias_key in ALPHA_SET_ALIASES:
+        return [ALPHA_REGISTRY[name] for name in ALPHA_SET_ALIASES[alias_key]]
 
     selected: list[AlphaDefinition] = []
     seen: set[str] = set()
     tokens = [token.strip().lower() for token in raw.split(",") if token.strip()]
     families = {definition.family for definition in ALPHA_REGISTRY.values()}
     for token in tokens:
+        if token in ALPHA_SET_ALIASES:
+            for name in ALPHA_SET_ALIASES[token]:
+                if name not in seen:
+                    selected.append(ALPHA_REGISTRY[name])
+                    seen.add(name)
+            continue
         if token in ALPHA_REGISTRY and token not in seen:
             selected.append(ALPHA_REGISTRY[token])
             seen.add(token)

@@ -51,6 +51,17 @@ def _read_float(name: str, default: float) -> float:
     return float(raw)
 
 
+def _read_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _read_choice(name: str, default: str, allowed: set[str]) -> str:
     raw = os.getenv(name, "").strip().lower()
     if not raw:
@@ -81,6 +92,7 @@ class RunConfig:
     classifications_file: Path
     selected_strategy_file: Path
     shadow_strategy_file: Path
+    research_baseline_file: Path
     research_cache_db_path: Path
     db_path: Path
     classification_source: str
@@ -88,6 +100,7 @@ class RunConfig:
     top_n: int
     gross_exposure: float
     book_mode: str
+    trading_paused: bool
     kill_switch_daily_return: float
     round_trip_cost_bps: float
     min_order_notional: float
@@ -157,7 +170,7 @@ def load_config(base_dir: Path | None = None) -> RunConfig:
     reference_dir = root / "private" / "reference"
     classifications_dir = reference_dir / "classifications"
     book_mode = (os.getenv("ALPACA_BOOK_MODE", "sector").strip().lower() or "sector")
-    if book_mode not in {"sector", "none"}:
+    if book_mode not in {"sector", "none", "sector_weighted", "none_weighted"}:
         book_mode = "sector"
     classification_source = _read_choice(
         "ALPACA_CLASSIFICATION_SOURCE",
@@ -194,6 +207,7 @@ def load_config(base_dir: Path | None = None) -> RunConfig:
         classifications_file=reference_dir / "classifications.csv",
         selected_strategy_file=private_dir / "selected_strategy.json",
         shadow_strategy_file=private_dir / "shadow_strategy.json",
+        research_baseline_file=root / "research_baseline.json",
         research_cache_db_path=root / "state" / "research_cache.db",
         db_path=root / "state" / "paper_trading.db",
         classification_source=classification_source,
@@ -201,6 +215,7 @@ def load_config(base_dir: Path | None = None) -> RunConfig:
         top_n=_read_int("ALPACA_TOP_N", 30),
         gross_exposure=_read_float("ALPACA_GROSS_EXPOSURE", 4.0),
         book_mode=book_mode,
+        trading_paused=_read_bool("ALPACA_TRADING_PAUSED", False),
         kill_switch_daily_return=_read_float("ALPACA_KILL_SWITCH_DAILY_RETURN", -0.02),
         round_trip_cost_bps=_read_float("ALPACA_ROUND_TRIP_COST_BPS", 5.0),
         min_order_notional=_read_float("ALPACA_MIN_ORDER_NOTIONAL", 50.0),

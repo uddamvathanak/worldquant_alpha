@@ -18,6 +18,7 @@ from broker_alpaca import AlpacaBroker
 from config import load_config, parse_trade_date
 from free_model_generator import FreeModelGeneratorError, generate_mutation_candidates, generator_enabled
 from research_cache import ResearchCache, build_evaluation_key
+from research_baseline import ResearchBaseline, load_research_baseline
 from research_runner import (
     DEFAULT_FEED,
     DEFAULT_PROMOTION_PROFILE,
@@ -28,30 +29,14 @@ from research_runner import (
 )
 
 
-SCREEN_ALPHA_SET = ",".join(
-    [
-        "smooth_momentum",
-        "breakout_quality",
-        "vwap_gap_revert",
-        "vwap_extreme_revert",
-        "pv_corr_contra",
-        "momentum_with_volume_confirm",
-        "profit_asset_gate_proxy_v1",
-    ]
-)
-SCREEN_TRAIN_DAYS = 252
-SCREEN_OOS_DAYS = 63
-SCREEN_TEST_DAYS = 63
-VALIDATION_TRAIN_DAYS = 1008
-VALIDATION_OOS_DAYS = 252
-VALIDATION_TEST_DAYS = 252
+SCREEN_ALPHA_SET = "literature_core"
 SCREEN_GROUP_LEVELS = ["sector"]
-SCREEN_BOOK_MODES = ["sector"]
-SCREEN_TOP_N = [50]
+SCREEN_BOOK_MODES = ["sector_weighted"]
+SCREEN_TOP_N = [3000]
 SCREEN_DECAY = [0]
 SCREEN_TRUNCATION = [None]
 STABILITY_GROUP_LEVELS = ["sector", "industry"]
-STABILITY_TOP_N = [30, 50, 75]
+STABILITY_TOP_N = [3000]
 STABILITY_DECAY = [0, 3, 5]
 STABILITY_TRUNCATION = [None, 0.05]
 STAGES = ["registry_screen", "stability_expand", "full_validation", "mutation"]
@@ -260,19 +245,25 @@ def _prepare_stage_inputs(
     cfg: Any,
     broker: AlpacaBroker,
     end_date: date,
+    classification_snapshot_date: date,
     feed: str,
     train_days: int,
     oos_days: int,
     test_days: int,
+    min_universe: int,
+    min_universe_ratio: float,
 ) -> dict[str, Any]:
     prepared = _prepare_inputs(
         cfg=cfg,
         broker=broker,
         end_date=end_date,
+        classification_snapshot_date=classification_snapshot_date,
         feed=feed,
         train_days=train_days,
         oos_days=oos_days,
         test_days=test_days,
+        min_universe=min_universe,
+        min_universe_ratio=min_universe_ratio,
     )
     prepared["split_map"] = _build_split_map(prepared)
     return prepared
@@ -382,7 +373,14 @@ def _latest_run_id(search_runs_dir: Path, *, exclude: str | None = None) -> str 
     return sorted(run_dirs, key=lambda item: item.name)[-1].name
 
 
-def _base_state(run_id: str, *, args: argparse.Namespace, cfg: Any) -> dict[str, Any]:
+def _load_baseline(cfg: Any, args: argparse.Namespace) -> ResearchBaseline:
+    baseline_file = Path(str(args.baseline_file or cfg.research_baseline_file))
+    return load_research_baseline(baseline_file)
+
+
+def _base_state(run_id: str, *, args: argparse.Namespace, cfg: Any, baseline: ResearchBaseline) -> dict[str, Any]:
+    end_date = str(args.end_date or baseline.end_date.isoformat())
+    feed = str(args.feed).strip().lower() or baseline.feed or DEFAULT_FEED
     return {
         "run_id": run_id,
         "created_at": _utc_now_iso(),
@@ -398,8 +396,14 @@ def _base_state(run_id: str, *, args: argparse.Namespace, cfg: Any) -> dict[str,
         "best_shadow_candidate": None,
         "last_checkpoint_at": _utc_now_iso(),
         "config": {
-            "feed": str(args.feed).strip().lower() or DEFAULT_FEED,
-            "end_date": str(args.end_date or ""),
+            "baseline_id": baseline.baseline_id,
+            "baseline_file": str(args.baseline_file or cfg.research_baseline_file),
+            "feed": feed,
+            "end_date": end_date,
+            "classification_snapshot_date": baseline.classification_snapshot_date.isoformat(),
+            "train_days": baseline.train_days,
+            "oos_days": baseline.oos_days,
+            "test_days": baseline.test_days,
             "screen_only": bool(args.screen_only),
             "mutation_only": bool(args.mutation_only),
             "promotion_profile": str(args.promotion_profile or DEFAULT_PROMOTION_PROFILE),
@@ -448,6 +452,17 @@ def _global_lock_owned(lock_path: Path) -> bool:
     pid = int(payload.get("pid", 0) or 0)
     if pid <= 0:
         return True
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            process_handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if process_handle == 0:
+                return False
+            ctypes.windll.kernel32.CloseHandle(process_handle)
+            return True
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -584,7 +599,7 @@ def _stage_b_candidates(ctx: SearchContext, *, gross_exposure: float) -> list[di
                             family=str(row["family"]),
                             params=dict(row["params"]),
                             group_level=group_level,
-                            book_mode="sector",
+                            book_mode="sector_weighted",
                             top_n=int(top_n),
                             gross_exposure=float(gross_exposure),
                             signal_decay=int(signal_decay),
@@ -607,6 +622,8 @@ def _stage_b_candidates(ctx: SearchContext, *, gross_exposure: float) -> list[di
 def _stage_c_candidates(ctx: SearchContext, *, gross_exposure: float) -> list[dict[str, Any]]:
     stability_results = _deserialize_results(_stage_results_path(ctx, "stability_expand"))
     filtered = _filter_oos_survivors(stability_results)
+    if "test_positive_month_ratio" not in filtered.columns:
+        filtered["test_positive_month_ratio"] = 0.0
     filtered = filtered[filtered["test_positive_month_ratio"] >= 0.55].copy().reset_index(drop=True)
     filtered = _sort_candidates(filtered, prefix="test_").head(5).reset_index(drop=True)
     filtered.to_csv(ctx.survivor_path, index=False)
@@ -1031,6 +1048,8 @@ def _write_search_report(ctx: SearchContext, *, state: dict[str, Any]) -> None:
         "",
         f"- run_id: {ctx.run_id}",
         f"- generated_at_utc: {_utc_now_iso()}",
+        f"- baseline_id: {state.get('config', {}).get('baseline_id', '')}",
+        f"- baseline_file: {state.get('config', {}).get('baseline_file', '')}",
         f"- current_stage: {state.get('current_stage', '')}",
         f"- current_activity: {state.get('current_activity', '') or 'unknown'}",
         f"- active_candidate: {state.get('active_candidate_name', '') or 'none'}",
@@ -1115,12 +1134,20 @@ def _search_context(cfg: Any, *, run_id: str, batch_size: int, max_runtime_min: 
     )
 
 
-def _load_or_create_state(ctx: SearchContext, *, args: argparse.Namespace) -> dict[str, Any]:
+def _load_or_create_state(
+    ctx: SearchContext,
+    *,
+    args: argparse.Namespace,
+    baseline: ResearchBaseline,
+) -> dict[str, Any]:
     if args.new_run or not ctx.state_path.exists():
-        state = _base_state(ctx.run_id, args=args, cfg=ctx.cfg)
+        state = _base_state(ctx.run_id, args=args, cfg=ctx.cfg, baseline=baseline)
         _write_json(ctx.state_path, state)
         return state
-    return _read_json(ctx.state_path, default=_base_state(ctx.run_id, args=args, cfg=ctx.cfg))
+    return _read_json(
+        ctx.state_path,
+        default=_base_state(ctx.run_id, args=args, cfg=ctx.cfg, baseline=baseline),
+    )
 
 
 def _resolve_run_id(cfg: Any, args: argparse.Namespace) -> str:
@@ -1137,6 +1164,7 @@ def _resolve_run_id(cfg: Any, args: argparse.Namespace) -> str:
 def _print_status(ctx: SearchContext, *, state: dict[str, Any]) -> int:
     winner_summary = _read_json(ctx.summary_path, default={})
     print(f"run_id: {ctx.run_id}")
+    print(f"baseline_id: {state.get('config', {}).get('baseline_id', '')}")
     print(f"current_stage: {state.get('current_stage', '')}")
     print(f"current_activity: {state.get('current_activity', '')}")
     print(f"active_candidate_id: {state.get('active_candidate_id', '')}")
@@ -1155,6 +1183,7 @@ def _print_status(ctx: SearchContext, *, state: dict[str, Any]) -> int:
 
 def run_search(args: argparse.Namespace) -> int:
     cfg = load_config()
+    baseline = _load_baseline(cfg, args)
     run_id = _resolve_run_id(cfg, args)
     ctx = _search_context(
         cfg,
@@ -1162,7 +1191,7 @@ def run_search(args: argparse.Namespace) -> int:
         batch_size=int(args.batch_size or cfg.alpha_search_batch_size),
         max_runtime_min=int(args.max_runtime_min or cfg.alpha_search_max_runtime_min),
     )
-    state = _load_or_create_state(ctx, args=args)
+    state = _load_or_create_state(ctx, args=args, baseline=baseline)
     if args.status:
         return _print_status(ctx, state=state)
 
@@ -1176,7 +1205,11 @@ def run_search(args: argparse.Namespace) -> int:
         if start_stage not in sequence:
             sequence = [start_stage]
 
-        end_date = parse_trade_date(args.end_date)
+        end_date = parse_trade_date(args.end_date) if args.end_date else baseline.end_date
+        feed = str(args.feed).strip().lower() or baseline.feed or DEFAULT_FEED
+        classification_snapshot_date = (
+            end_date if args.dynamic_baseline else baseline.classification_snapshot_date
+        )
         api_key, api_secret = cfg.require_alpaca_credentials()
         broker = AlpacaBroker(api_key, api_secret, paper=True)
 
@@ -1186,28 +1219,23 @@ def run_search(args: argparse.Namespace) -> int:
             if stage in prepared_cache:
                 return prepared_cache[stage]
             state["current_stage"] = _stage_running_name(stage)
-            _log(f"stage={stage} action=prepare_inputs feed={str(args.feed).strip().lower() or DEFAULT_FEED}")
+            _log(
+                f"stage={stage} action=prepare_inputs baseline={baseline.baseline_id} "
+                f"feed={feed} end_date={end_date.isoformat()}"
+            )
             _set_activity(state, ctx, activity=f"{stage}:preparing_inputs")
-            if stage in {"registry_screen", "stability_expand"}:
-                prepared_cache[stage] = _prepare_stage_inputs(
-                    cfg=cfg,
-                    broker=broker,
-                    end_date=end_date,
-                    feed=str(args.feed).strip().lower() or DEFAULT_FEED,
-                    train_days=SCREEN_TRAIN_DAYS,
-                    oos_days=SCREEN_OOS_DAYS,
-                    test_days=SCREEN_TEST_DAYS,
-                )
-            else:
-                prepared_cache[stage] = _prepare_stage_inputs(
-                    cfg=cfg,
-                    broker=broker,
-                    end_date=end_date,
-                    feed=str(args.feed).strip().lower() or DEFAULT_FEED,
-                    train_days=VALIDATION_TRAIN_DAYS,
-                    oos_days=VALIDATION_OOS_DAYS,
-                    test_days=VALIDATION_TEST_DAYS,
-                )
+            prepared_cache[stage] = _prepare_stage_inputs(
+                cfg=cfg,
+                broker=broker,
+                end_date=end_date,
+                classification_snapshot_date=classification_snapshot_date,
+                feed=feed,
+                train_days=baseline.train_days,
+                oos_days=baseline.oos_days,
+                test_days=baseline.test_days,
+                min_universe=baseline.min_universe,
+                min_universe_ratio=baseline.min_universe_ratio,
+            )
             _log(f"stage={stage} action=prepared_inputs")
             _set_activity(state, ctx, activity=f"{stage}:inputs_ready")
             return prepared_cache[stage]
@@ -1257,14 +1285,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen-only", action="store_true", help="Run only the fast registry screening stage.")
     parser.add_argument("--mutation-only", action="store_true", help="Run only the mutation stage.")
     parser.add_argument("--status", action="store_true", help="Print status for the latest or provided run.")
+    parser.add_argument("--baseline-file", default="", help="Optional research baseline JSON file.")
+    parser.add_argument(
+        "--dynamic-baseline",
+        action="store_true",
+        help="Ignore the pinned classification snapshot date and use the latest eligible snapshot for the chosen end date.",
+    )
     parser.add_argument(
         "--stage",
         choices=["auto", "registry_screen", "stability_expand", "full_validation", "mutation"],
         default="auto",
         help="Optional stage override.",
     )
-    parser.add_argument("--end-date", default="", help="Latest completed date in YYYY-MM-DD.")
-    parser.add_argument("--feed", default=DEFAULT_FEED, help="Historical feed for search evaluation.")
+    parser.add_argument("--end-date", default="", help="Override latest completed date in YYYY-MM-DD.")
+    parser.add_argument("--feed", default="", help="Override historical feed for search evaluation.")
     parser.add_argument("--promotion-profile", default=DEFAULT_PROMOTION_PROFILE)
     parser.add_argument("--batch-size", type=int, default=0, help="Max candidates processed per invocation.")
     parser.add_argument("--max-runtime-min", type=int, default=0, help="Max wall-clock runtime for this invocation.")

@@ -39,6 +39,10 @@ def _is_within_et_window(target_hhmm: str, *, window_minutes: int) -> bool:
 
 def run_daily_pipeline(args: argparse.Namespace) -> int:
     cfg = load_config()
+    if cfg.trading_paused and not args.dry_run:
+        print("trading_paused: ALPACA_TRADING_PAUSED=1")
+        return 0
+
     strategy_file = (
         Path(args.strategy_file).resolve()
         if getattr(args, "strategy_file", "")
@@ -113,6 +117,7 @@ def run_daily_pipeline(args: argparse.Namespace) -> int:
             strategy_file=args.strategy_file,
             model=args.model,
             group_level=args.group_level,
+            book_mode=args.book_mode,
             lookback_days=args.lookback_days,
             smoothing=args.smoothing,
             top_n=args.top_n,
@@ -288,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--book-mode",
-        choices=["sector", "none"],
+        choices=["sector", "none", "sector_weighted", "none_weighted"],
         default="",
         help="Portfolio construction mode used by the rebalance stage.",
     )

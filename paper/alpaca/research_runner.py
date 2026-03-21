@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -33,13 +34,14 @@ from classification_store import (
 from config import load_config, parse_trade_date
 from historical_store import HistoricalStore
 from monthly_eval import compute_proxy_metrics
+from research_baseline import ResearchBaseline, load_research_baseline
 
 
 DEFAULT_FEED = "sip"
-DEFAULT_ALPHA_SET = "wave1"
+DEFAULT_ALPHA_SET = "literature_core"
 DEFAULT_GROUP_LEVEL_GRID = ["market", "sector", "industry"]
-DEFAULT_BOOK_MODE_GRID = ["sector", "none"]
-DEFAULT_TOP_N_GRID = [30, 50, 75, 100]
+DEFAULT_BOOK_MODE_GRID = ["sector_weighted"]
+DEFAULT_TOP_N_GRID = [3000]
 DEFAULT_DECAY_GRID = [0, 3, 5]
 DEFAULT_TRUNCATION_GRID = [None, 0.05, 0.10]
 DEFAULT_PROMOTION_PROFILE = "balanced"
@@ -95,26 +97,31 @@ def _prepare_inputs(
     cfg: Any,
     broker: AlpacaBroker,
     end_date: date,
+    classification_snapshot_date: date | None = None,
     feed: str,
     train_days: int,
     oos_days: int,
     test_days: int,
+    min_universe: int = DEFAULT_MIN_UNIVERSE,
+    min_universe_ratio: float = DEFAULT_MIN_UNIVERSE_RATIO,
 ) -> dict[str, Any]:
     try:
         classification_snapshot_path = resolve_classification_snapshot_path(
             cfg.reference_dir,
-            snapshot_date=end_date,
+            snapshot_date=classification_snapshot_date or end_date,
         )
-        classifications = load_classifications_snapshot(cfg.reference_dir, snapshot_date=end_date)
+        classifications = load_classifications_snapshot(
+            cfg.reference_dir,
+            snapshot_date=classification_snapshot_date or end_date,
+        )
         symbol_master = load_symbol_master(cfg.reference_dir)
     except ClassificationStoreError as exc:
         raise BacktestError(str(exc)) from exc
 
-    candidate_symbols = (
-        sorted(set(symbol_master["symbol"].astype(str).str.upper().tolist()))
-        if not symbol_master.empty
-        else sorted(set(classifications["symbol"].astype(str).str.upper().tolist()))
-    )
+    if not classifications.empty:
+        candidate_symbols = sorted(set(classifications["symbol"].astype(str).str.upper().tolist()))
+    else:
+        candidate_symbols = sorted(set(symbol_master["symbol"].astype(str).str.upper().tolist()))
     if not candidate_symbols:
         raise BacktestError("Classification cache produced no candidate symbols.")
 
@@ -166,11 +173,14 @@ def _prepare_inputs(
         coverage_ratio = _coverage_ratio(
             universe_lookup,
             signal_dates,
-            min_symbols=DEFAULT_MIN_UNIVERSE,
+            min_symbols=int(min_universe),
         )
-        if coverage_ratio >= DEFAULT_MIN_UNIVERSE_RATIO:
+        if coverage_ratio >= float(min_universe_ratio):
             return {
                 "classification_snapshot_path": classification_snapshot_path,
+                "classification_snapshot_date": (
+                    classification_snapshot_date or end_date
+                ).isoformat(),
                 "classifications": classifications,
                 "symbol_master": symbol_master,
                 "store": store,
@@ -183,7 +193,7 @@ def _prepare_inputs(
                 "degraded_depth": degraded_depth,
             }
         last_error = BacktestError(
-            f"Universe coverage ratio {coverage_ratio:.3f} below required {DEFAULT_MIN_UNIVERSE_RATIO:.2f}"
+            f"Universe coverage ratio {coverage_ratio:.3f} below required {float(min_universe_ratio):.2f}"
         )
         if train_window == FALLBACK_TRAIN_DAYS:
             break
@@ -260,8 +270,10 @@ def _sort_candidates(frame: pd.DataFrame, *, prefix: str) -> pd.DataFrame:
 def _apply_sector_vs_none_rule(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
-    sector_best = _sort_candidates(frame[frame["book_mode"] == "sector"].copy(), prefix="test_")
-    none_best = _sort_candidates(frame[frame["book_mode"] == "none"].copy(), prefix="test_")
+    sector_modes = {"sector", "sector_weighted"}
+    none_modes = {"none", "none_weighted"}
+    sector_best = _sort_candidates(frame[frame["book_mode"].isin(sector_modes)].copy(), prefix="test_")
+    none_best = _sort_candidates(frame[frame["book_mode"].isin(none_modes)].copy(), prefix="test_")
     if sector_best.empty or none_best.empty:
         return frame.copy()
     best_sector = sector_best.iloc[0]
@@ -274,7 +286,7 @@ def _apply_sector_vs_none_rule(frame: pd.DataFrame) -> pd.DataFrame:
     )
     if none_beats_sector:
         return frame.copy()
-    return frame[frame["book_mode"] == "sector"].copy().reset_index(drop=True)
+    return frame[frame["book_mode"].isin(sector_modes)].copy().reset_index(drop=True)
 
 
 def _build_strategy_from_row(row: pd.Series, *, approved: bool, source_run_id: str, feed: str) -> StrategySpec:
@@ -413,19 +425,25 @@ def _run_selected_iex_robustness(
     cfg: Any,
     broker: AlpacaBroker,
     end_date: date,
+    classification_snapshot_date: date,
     strategy: StrategySpec,
     train_days: int,
     oos_days: int,
     test_days: int,
+    min_universe: int,
+    min_universe_ratio: float,
 ) -> pd.DataFrame:
     prepared = _prepare_inputs(
         cfg=cfg,
         broker=broker,
         end_date=end_date,
+        classification_snapshot_date=classification_snapshot_date,
         feed="iex",
         train_days=train_days,
         oos_days=oos_days,
         test_days=test_days,
+        min_universe=min_universe,
+        min_universe_ratio=min_universe_ratio,
     )
     execution_map = prepared["execution_map"]
     split_map = {
@@ -479,27 +497,58 @@ def _run_selected_iex_robustness(
     return pd.DataFrame(rows)
 
 
+def _load_baseline(cfg: Any, args: argparse.Namespace) -> ResearchBaseline:
+    baseline_file = Path(str(args.baseline_file or cfg.research_baseline_file))
+    return load_research_baseline(baseline_file)
+
+
+def _resolve_research_args(cfg: Any, args: argparse.Namespace) -> dict[str, Any]:
+    baseline = _load_baseline(cfg, args)
+    dynamic_baseline = bool(args.dynamic_baseline)
+    end_date = parse_trade_date(args.end_date) if args.end_date else baseline.end_date
+    return {
+        "baseline": baseline,
+        "dynamic_baseline": dynamic_baseline,
+        "end_date": end_date,
+        "feed": str(args.feed).strip().lower() or baseline.feed,
+        "train_days": int(args.train_days or baseline.train_days),
+        "oos_days": int(args.oos_days or baseline.oos_days),
+        "test_days": int(args.test_days or baseline.test_days),
+        "alpha_set": str(args.alpha_set).strip() or baseline.alpha_set,
+        "group_level_grid": _parse_str_grid(args.group_level_grid, baseline.group_level_grid),
+        "book_mode_grid": _parse_str_grid(args.book_mode_grid, baseline.book_mode_grid),
+        "top_n_grid": _parse_int_grid(args.top_n_grid, baseline.top_n_grid),
+        "decay_grid": _parse_int_grid(args.decay_grid, baseline.decay_grid),
+        "truncation_grid": _parse_truncation_grid(args.truncation_grid, baseline.truncation_grid),
+        "classification_snapshot_date": end_date if dynamic_baseline else baseline.classification_snapshot_date,
+    }
+
+
 def run_research(args: argparse.Namespace) -> int:
     cfg = load_config()
-    end_date = parse_trade_date(args.end_date)
+    resolved = _resolve_research_args(cfg, args)
+    baseline = resolved["baseline"]
+    end_date = resolved["end_date"]
     api_key, api_secret = cfg.require_alpaca_credentials()
     broker = AlpacaBroker(api_key, api_secret, paper=True)
-
-    group_level_grid = _parse_str_grid(args.group_level_grid, DEFAULT_GROUP_LEVEL_GRID)
-    book_mode_grid = _parse_str_grid(args.book_mode_grid, DEFAULT_BOOK_MODE_GRID)
-    top_n_grid = _parse_int_grid(args.top_n_grid, DEFAULT_TOP_N_GRID)
-    decay_grid = _parse_int_grid(args.decay_grid, DEFAULT_DECAY_GRID)
-    truncation_grid = _parse_truncation_grid(args.truncation_grid, DEFAULT_TRUNCATION_GRID)
 
     prepared = _prepare_inputs(
         cfg=cfg,
         broker=broker,
         end_date=end_date,
-        feed=str(args.feed).strip().lower() or DEFAULT_FEED,
-        train_days=int(args.train_days),
-        oos_days=int(args.oos_days),
-        test_days=int(args.test_days),
+        classification_snapshot_date=resolved["classification_snapshot_date"],
+        feed=resolved["feed"],
+        train_days=resolved["train_days"],
+        oos_days=resolved["oos_days"],
+        test_days=resolved["test_days"],
+        min_universe=baseline.min_universe,
+        min_universe_ratio=baseline.min_universe_ratio,
     )
+    group_level_grid = resolved["group_level_grid"]
+    book_mode_grid = resolved["book_mode_grid"]
+    top_n_grid = resolved["top_n_grid"]
+    decay_grid = resolved["decay_grid"]
+    truncation_grid = resolved["truncation_grid"]
     execution_map = prepared["execution_map"]
     split_map = {
         execution_date.isoformat(): name
@@ -512,13 +561,13 @@ def run_research(args: argparse.Namespace) -> int:
     }
 
     all_candidates = expand_research_candidates(
-        alpha_set=args.alpha_set,
+        alpha_set=resolved["alpha_set"],
         group_level_grid=group_level_grid,
         book_mode_grid=book_mode_grid,
         top_n_grid=top_n_grid,
         decay_grid=decay_grid,
         truncation_grid=truncation_grid,
-        gross_exposure=cfg.gross_exposure,
+        gross_exposure=float(baseline.gross_exposure),
     )
 
     train_map = execution_map[execution_map["execution_date"].isin(prepared["splits"].train_dates)].reset_index(drop=True)
@@ -669,16 +718,20 @@ def run_research(args: argparse.Namespace) -> int:
         cfg=cfg,
         broker=broker,
         end_date=end_date,
+        classification_snapshot_date=resolved["classification_snapshot_date"],
         strategy=selected_strategy,
         train_days=len(prepared["splits"].train_dates),
         oos_days=len(prepared["splits"].oos_dates),
         test_days=len(prepared["splits"].test_dates),
+        min_universe=baseline.min_universe,
+        min_universe_ratio=baseline.min_universe_ratio,
     )
 
     promotion_lines = [
         "# Promotion Report",
         "",
-        f"- feed: {str(args.feed).strip().lower() or DEFAULT_FEED}",
+        f"- baseline_id: {baseline.baseline_id}",
+        f"- feed: {resolved['feed']}",
         f"- approved: {int(selected_strategy.approved)}",
         f"- strategy_type: {selected_strategy.strategy_type}",
         f"- member_count: {len(selected_strategy.members)}",
@@ -703,17 +756,20 @@ def run_research(args: argparse.Namespace) -> int:
         "promotion_report": promotion_report,
         "iex_robustness": iex_robustness,
         "metadata": {
-            "feed": str(args.feed).strip().lower() or DEFAULT_FEED,
+            "baseline_id": baseline.baseline_id,
+            "baseline_file": str(cfg.research_baseline_file),
+            "feed": resolved["feed"],
             "latest_completed_date": prepared["splits"].latest_completed_date.isoformat(),
             "usable_end_date": prepared["splits"].usable_end_date.isoformat(),
             "classification_snapshot": str(prepared["classification_snapshot_path"]),
+            "classification_snapshot_date": prepared["classification_snapshot_date"],
             "train_days": len(prepared["splits"].train_dates),
             "oos_days": len(prepared["splits"].oos_dates),
             "test_days": len(prepared["splits"].test_dates),
             "round_trip_cost_bps": cfg.round_trip_cost_bps,
             "gross_exposure": selected_strategy.gross_exposure,
             "book_mode": selected_strategy.book_mode,
-            "alpha_set": args.alpha_set,
+            "alpha_set": resolved["alpha_set"],
             "group_level_grid": group_level_grid,
             "book_mode_grid": book_mode_grid,
             "top_n_grid": top_n_grid,
@@ -721,6 +777,7 @@ def run_research(args: argparse.Namespace) -> int:
             "truncation_grid": truncation_grid,
             "degraded_depth": prepared["degraded_depth"],
             "coverage_ratio": prepared["coverage_ratio"],
+            "dynamic_baseline": resolved["dynamic_baseline"],
             "approximations": [
                 "Sector and industry classifications are snapshot-based, not point-in-time historical classifications.",
                 "Historical shortability is approximated after the liquidity/universe screen.",
@@ -751,12 +808,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the staged Alpaca research sweep and optionally promote the selected strategy."
     )
-    parser.add_argument("--end-date", default="", help="Latest completed date in YYYY-MM-DD.")
-    parser.add_argument("--feed", default=DEFAULT_FEED, help="Historical feed for research runs.")
-    parser.add_argument("--train-days", type=int, default=1008, help="Preferred train execution-day count.")
-    parser.add_argument("--oos-days", type=int, default=252, help="OOS execution-day count.")
-    parser.add_argument("--test-days", type=int, default=252, help="Unseen execution-day count.")
-    parser.add_argument("--alpha-set", default=DEFAULT_ALPHA_SET, help="Alpha set name, family, or comma-separated list.")
+    parser.add_argument("--baseline-file", default="", help="Optional research baseline JSON file.")
+    parser.add_argument(
+        "--dynamic-baseline",
+        action="store_true",
+        help="Ignore the pinned classification snapshot date and use the latest eligible snapshot for the chosen end date.",
+    )
+    parser.add_argument("--end-date", default="", help="Override latest completed date in YYYY-MM-DD.")
+    parser.add_argument("--feed", default="", help="Override historical feed for research runs.")
+    parser.add_argument("--train-days", type=int, default=0, help="Override train execution-day count.")
+    parser.add_argument("--oos-days", type=int, default=0, help="Override OOS execution-day count.")
+    parser.add_argument("--test-days", type=int, default=0, help="Override unseen execution-day count.")
+    parser.add_argument("--alpha-set", default="", help="Alpha set name, family, or comma-separated list.")
     parser.add_argument("--group-level-grid", default="", help="Comma-separated group levels.")
     parser.add_argument("--book-mode-grid", default="", help="Comma-separated book modes.")
     parser.add_argument("--top-n-grid", default="", help="Comma-separated top-N values.")

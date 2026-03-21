@@ -150,9 +150,32 @@ Run a specific date:
 conda run -n alpaca-paper python paper/alpaca/daily_pipeline.py --date 2026-02-25
 ```
 
-## 9) Backtest runner
+## 9) Frozen research baseline
 
-Run the historical proxy backtest with fixed 4y/1y/1y train-OOS-unseen splits:
+Research now defaults to the committed frozen baseline:
+- file: `paper/alpaca/research_baseline.json`
+- baseline id: `sip_top3000_weighted_2026q1_v1`
+- split: `756 / 252 / 252`
+- end date: `2026-03-20`
+- classification snapshot: `2026-03-17`
+
+This keeps the candidate cache and leaderboard comparable across nights instead of drifting with the latest available data.
+
+## 10) Backtest runner
+
+Run the staged research sweep on the frozen baseline:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/research_runner.py
+```
+
+Override the static baseline only when you intentionally want a different sample:
+
+```powershell
+conda run -n alpaca-paper python paper/alpaca/research_runner.py --dynamic-baseline --end-date 2026-03-20
+```
+
+Run the historical proxy backtest directly:
 
 ```powershell
 conda run -n alpaca-paper python paper/alpaca/backtest_runner.py --end-date 2026-03-16 --feed iex --train-days 1008 --oos-days 252 --test-days 252
@@ -161,7 +184,7 @@ conda run -n alpaca-paper python paper/alpaca/backtest_runner.py --end-date 2026
 Outputs are written under:
 - `paper/alpaca/private/backtests/<run_stamp>/`
 
-## 10) Nightly search runner
+## 11) Nightly search runner
 
 Start a new resumable nightly search run:
 
@@ -188,7 +211,7 @@ Search outputs are written under:
 
 The nightly search is shadow-only and does not overwrite `paper/alpaca/private/selected_strategy.json`.
 
-## 11) Install Windows task scheduler job
+## 12) Install Windows task scheduler job
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File paper/alpaca/install_scheduler.ps1
@@ -225,7 +248,7 @@ Install the separate nightly research task:
 powershell -ExecutionPolicy Bypass -File paper/alpaca/install_research_scheduler.ps1
 ```
 
-## 12) Month-end proxy evaluation
+## 13) Month-end proxy evaluation
 
 ```powershell
 conda run -n alpaca-paper python paper/alpaca/monthly_eval.py --month 2026-02
@@ -235,7 +258,7 @@ This writes:
 - `paper/alpaca/logs/summary_YYYY-MM.csv`
 - copy-ready `wqa log-result` command printed in terminal
 
-## 13) Manual emergency flatten command
+## 14) Manual emergency flatten command
 
 Preview close-all without placing orders:
 

@@ -20,11 +20,11 @@ from alpha_templates import (  # type: ignore  # noqa: E402
 
 
 def _bars_fixture() -> pd.DataFrame:
-    dates = pd.bdate_range("2026-01-05", periods=8)
+    dates = pd.bdate_range("2025-01-02", periods=260)
     close_map = {
-        "AAA": [100, 101, 102, 103, 104, 105, 106, 107],
-        "BBB": [100, 99, 98, 97, 96, 95, 94, 93],
-        "CCC": [100, 100.2, 100.5, 100.7, 101, 101.2, 101.5, 101.8],
+        "AAA": [100 + 0.5 * idx for idx in range(len(dates))],
+        "BBB": [100 - 0.4 * idx for idx in range(len(dates))],
+        "CCC": [100 + 0.1 * idx for idx in range(len(dates))],
     }
     rows: list[dict[str, object]] = []
     for symbol, closes in close_map.items():
@@ -145,3 +145,24 @@ def test_compute_alpha_score_panel_returns_latest_scores_for_registry_alpha() ->
     latest_date = panel["trade_date"].max()
     latest = panel[panel["trade_date"] == latest_date]
     assert latest["score"].notna().all()
+
+
+def test_compute_alpha_panel_supports_literature_templates() -> None:
+    panel = compute_alpha_panel(
+        "skip_month_momentum",
+        _bars_fixture(),
+        classifications=_classifications_fixture(),
+        group_level="sector",
+        params={"lookback": 126, "skip": 21},
+    )
+    latest = panel[panel["trade_date"] == panel["trade_date"].max()]
+    assert latest["alpha_raw"].notna().all()
+
+    low_vol_panel = compute_alpha_panel(
+        "low_volatility_defensive",
+        _bars_fixture(),
+        classifications=_classifications_fixture(),
+        group_level="sector",
+        params={"window": 63},
+    )
+    assert low_vol_panel["alpha_raw"].notna().any()

@@ -29,6 +29,8 @@ Never commit:
 - `paper/alpaca/backtest_runner.py` run the staged research/backtest workflow
 - `paper/alpaca/research_runner.py` stage family sweeps, filters, basket selection, and promotion
 - `paper/alpaca/search_runner.py` resumable nightly single-alpha search with shadow-only output
+- `paper/alpaca/research_baseline.json` frozen research sample used for comparable backtests
+- `paper/alpaca/STRATEGY_RESEARCH_SHORTLIST.md` literature-backed alpha families to test first
 - `paper/alpaca/alpha_registry.py` declare research alpha families and selected-strategy schema
 - `paper/alpaca/alpha_templates.py` compute price/volume alpha panels and score post-processing
 - `paper/alpaca/alpha_dsl.py` validate strict JSON mutation candidates against the registry
@@ -104,8 +106,9 @@ conda run -n alpaca-paper python paper/alpaca/backtest_runner.py --end-date 2026
 
 Run the full staged research sweep:
 ```powershell
-conda run -n alpaca-paper python paper/alpaca/research_runner.py --end-date 2026-03-16 --feed sip --alpha-set wave1
+conda run -n alpaca-paper python paper/alpaca/research_runner.py
 ```
+By default this now uses the frozen baseline in `paper/alpaca/research_baseline.json`.
 
 Run the resumable nightly search pipeline:
 ```powershell
@@ -120,6 +123,11 @@ conda run -n alpaca-paper python paper/alpaca/search_runner.py --resume
 Check latest search status:
 ```powershell
 conda run -n alpaca-paper python paper/alpaca/search_runner.py --status
+```
+
+Override the frozen baseline only when you intentionally want a new sample:
+```powershell
+conda run -n alpaca-paper python paper/alpaca/research_runner.py --dynamic-baseline --end-date 2026-03-20
 ```
 
 Run full daily pipeline (generate signal + rebalance):
@@ -223,6 +231,16 @@ Default behavior:
 - Skip-day semantics: skip statuses hold positions; no forced flatten.
 - Cost model: 5 bps round-trip for proxy metric accounting
 - Missed runs: logged, never backfilled late
+
+## Static research baseline
+
+- Frozen baseline file: `paper/alpaca/research_baseline.json`
+- Current baseline id: `sip_top3000_weighted_2026q1_v1`
+- Current frozen split: `756 / 252 / 252`
+- Current frozen end date: `2026-03-20`
+- Current frozen classification snapshot: `2026-03-17`
+
+This keeps candidate comparisons stable across runs and makes the SQLite research cache much more useful.
 
 ## Data coverage (important)
 

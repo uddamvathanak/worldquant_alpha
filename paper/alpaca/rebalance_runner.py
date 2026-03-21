@@ -32,6 +32,9 @@ from signal_loader import load_signal_file, signal_path_for_date
 from tracker import DailyMetricRecord, PaperTracker
 
 
+WEIGHTED_BOOK_MODES = {"sector_weighted", "none_weighted"}
+
+
 def _rolling_sharpe(returns: list[float]) -> float:
     if len(returns) < 2:
         return 0.0
@@ -176,6 +179,27 @@ def _build_daily_metric_record(
     )
 
 
+def _build_shortable_map(broker: AlpacaBroker, symbols: list[str]) -> dict[str, bool]:
+    normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    if not normalized:
+        return {}
+    try:
+        assets = broker.list_assets()
+    except Exception:
+        return broker.get_shortable_map(normalized)
+    if assets.empty:
+        return broker.get_shortable_map(normalized)
+
+    assets["symbol"] = assets["symbol"].astype(str).str.strip().str.upper()
+    filtered = assets[assets["symbol"].isin(normalized)].copy()
+    if filtered.empty:
+        return broker.get_shortable_map(normalized)
+    return {
+        str(row["symbol"]).strip().upper(): bool(row.get("shortable", False) and row.get("tradable", False))
+        for _, row in filtered.iterrows()
+    }
+
+
 def run_rebalance(args: argparse.Namespace) -> int:
     cfg = load_config()
 
@@ -241,6 +265,15 @@ def run_rebalance(args: argparse.Namespace) -> int:
                 print(f"[{trade_date}] skipped_schedule_window {detail}")
                 return 0
 
+        if cfg.trading_paused and not args.dry_run:
+            tracker.update_run_finish(
+                run_id,
+                status="skipped_trading_paused",
+                reason="ALPACA_TRADING_PAUSED=1",
+            )
+            print(f"[{trade_date}] skipped_trading_paused")
+            return 0
+
         api_key, api_secret = cfg.require_alpaca_credentials()
         broker = AlpacaBroker(api_key, api_secret, paper=True)
 
@@ -301,8 +334,11 @@ def run_rebalance(args: argparse.Namespace) -> int:
             return 0
 
         signals = load_signal_file(signal_path, trade_date=trade_date)
-        short_candidates = signals.nsmallest(cfg.top_n, "score")["symbol"].tolist()
-        shortable_map = broker.get_shortable_map(short_candidates)
+        if cfg.book_mode in WEIGHTED_BOOK_MODES:
+            short_candidates = signals["symbol"].astype(str).str.strip().str.upper().tolist()
+        else:
+            short_candidates = signals.nsmallest(cfg.top_n, "score")["symbol"].tolist()
+        shortable_map = _build_shortable_map(broker, short_candidates)
 
         build = build_sector_neutral_targets(
             signals,
@@ -550,9 +586,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--book-mode",
-        choices=["sector", "none"],
+        choices=["sector", "none", "sector_weighted", "none_weighted"],
         default="",
-        help="Portfolio construction mode: sector-matched or raw balanced book.",
+        help="Portfolio construction mode: count-matched or weighted full-book.",
     )
     parser.add_argument(
         "--dry-run",

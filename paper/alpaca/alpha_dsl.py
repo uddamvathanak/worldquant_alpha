@@ -8,8 +8,8 @@ from alpha_registry import AlphaDefinition, get_alpha_definition
 
 
 ALLOWED_GROUP_LEVELS = {"market", "sector", "industry"}
-ALLOWED_BOOK_MODES = {"sector", "none"}
-ALLOWED_TOP_N = {30, 50, 75, 100}
+ALLOWED_BOOK_MODES = {"sector", "none", "sector_weighted", "none_weighted"}
+ALLOWED_TOP_N = {30, 50, 75, 100, 200, 500, 1000, 3000}
 ALLOWED_SIGNAL_DECAY = {0, 3, 5, 10}
 ALLOWED_SCORE_TRUNCATION = {None, 0.05, 0.10}
 
@@ -201,4 +201,3 @@ def validate_candidate_batch(payload: Any, *, max_candidates: int = 20) -> list[
         seen.add(signature)
         out.append(candidate)
     return out
-

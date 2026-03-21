@@ -94,8 +94,8 @@ def _build_user_prompt(
             "max_candidates": int(max_candidates),
             "rules": {
                 "allowed_group_level": ["market", "sector", "industry"],
-                "allowed_book_mode": ["sector", "none"],
-                "allowed_top_n": [30, 50, 75, 100],
+                "allowed_book_mode": ["sector", "none", "sector_weighted", "none_weighted"],
+                "allowed_top_n": [30, 50, 75, 100, 200, 500, 1000, 3000],
                 "allowed_signal_decay": [0, 3, 5, 10],
                 "allowed_score_truncation": [None, 0.05, 0.10],
                 "registry_only": True,
@@ -171,4 +171,3 @@ def generate_mutation_candidates(
     except AlphaDslError as exc:
         raise FreeModelGeneratorError(str(exc)) from exc
     return candidates, content
-

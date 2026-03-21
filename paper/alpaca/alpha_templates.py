@@ -183,6 +183,25 @@ def _apply_formula(panel: pd.DataFrame, alpha_name: str, params: dict[str, Any])
         std_ret = grouped["ret_1d"].transform(lambda s: s.rolling(window=window, min_periods=window).std(ddof=0))
         return mean_ret.astype(float).div(std_ret.astype(float) + ALPHA_EPS)
 
+    if name == "skip_month_momentum":
+        lookback = int(params.get("lookback", 126))
+        skip = int(params.get("skip", 21))
+        prior = grouped["c"].shift(skip)
+        base = grouped["c"].shift(lookback)
+        return prior.astype(float).div(base.astype(float) + ALPHA_EPS) - 1.0
+
+    if name == "high_52w_proximity":
+        window = int(params.get("window", 252))
+        trailing_high = grouped["c"].transform(lambda s: s.rolling(window=window, min_periods=window).max())
+        return panel["c"].astype(float).div(trailing_high.astype(float) + ALPHA_EPS) - 1.0
+
+    if name == "low_volatility_defensive":
+        window = int(params.get("window", 63))
+        volatility = grouped["ret_1d"].transform(
+            lambda s: s.rolling(window=window, min_periods=window).std(ddof=0)
+        )
+        return -volatility.astype(float)
+
     if name == "breakout_quality":
         window = int(params.get("window", 20))
         breakout = grouped["c"].transform(

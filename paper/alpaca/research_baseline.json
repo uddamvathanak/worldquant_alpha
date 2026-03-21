@@ -1,0 +1,38 @@
+{
+  "baseline_id": "sip_top3000_weighted_2026q1_v1",
+  "description": "Frozen SIP research baseline for Alpaca price-volume alpha search.",
+  "feed": "sip",
+  "end_date": "2026-03-20",
+  "classification_snapshot_date": "2026-03-17",
+  "train_days": 756,
+  "oos_days": 252,
+  "test_days": 252,
+  "group_level_grid": [
+    "sector",
+    "industry"
+  ],
+  "book_mode_grid": [
+    "sector_weighted"
+  ],
+  "top_n_grid": [
+    3000
+  ],
+  "decay_grid": [
+    0,
+    3,
+    5
+  ],
+  "truncation_grid": [
+    null,
+    0.05
+  ],
+  "gross_exposure": 4.0,
+  "alpha_set": "literature_core",
+  "min_universe": 2500,
+  "min_universe_ratio": 0.9,
+  "notes": [
+    "This baseline stays fixed so candidate comparisons remain stable across runs.",
+    "The train window is capped at 756 trading days because that is the deepest stable free SIP window currently available in this environment.",
+    "Classifications are pinned to the cached 2026-03-17 SEC-derived snapshot."
+  ]
+}

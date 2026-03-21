@@ -36,6 +36,7 @@ DEFAULT_TRAIN_DAYS = 1008
 DEFAULT_OOS_DAYS = 252
 DEFAULT_TEST_DAYS = 252
 DEFAULT_INITIAL_EQUITY = 100_000.0
+WEIGHTED_BOOK_MODES = {"sector_weighted", "none_weighted"}
 
 
 class BacktestError(RuntimeError):
@@ -361,6 +362,20 @@ def _period_turnover(prev_weights: pd.Series, next_weights: pd.Series) -> float:
     return float((next_aligned - prev_aligned).abs().sum())
 
 
+def _min_scored_requirement(*, top_n: int, book_mode: str) -> int:
+    if str(book_mode).strip().lower() in WEIGHTED_BOOK_MODES:
+        return 200
+    return max(50, 2 * int(top_n))
+
+
+def _is_full_book(*, long_count: int, short_count: int, top_n: int, book_mode: str) -> bool:
+    book_mode_norm = str(book_mode).strip().lower()
+    if book_mode_norm in WEIGHTED_BOOK_MODES:
+        threshold = max(100, min(int(top_n), 500))
+        return bool(long_count >= threshold and short_count >= threshold)
+    return bool(long_count >= int(top_n) and short_count >= int(top_n))
+
+
 def run_backtest_candidate(
     bars: pd.DataFrame,
     classifications: pd.DataFrame,
@@ -372,7 +387,7 @@ def run_backtest_candidate(
     initial_equity: float = DEFAULT_INITIAL_EQUITY,
     min_scored_symbols: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    min_scored = int(min_scored_symbols or max(50, 2 * candidate.top_n))
+    min_scored = int(min_scored_symbols or _min_scored_requirement(top_n=candidate.top_n, book_mode=candidate.book_mode))
     panel = compute_profit_asset_gate_proxy_panel(
         bars,
         classifications=classifications,
@@ -742,7 +757,7 @@ def run_research_candidate(
     initial_equity: float = DEFAULT_INITIAL_EQUITY,
     min_scored_symbols: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    min_scored = int(min_scored_symbols or max(50, 2 * candidate.top_n))
+    min_scored = int(min_scored_symbols or _min_scored_requirement(top_n=candidate.top_n, book_mode=candidate.book_mode))
     signal_dates = execution_map["signal_date"].drop_duplicates().tolist()
     score_panel, _ = compute_alpha_score_panel(
         candidate.alpha_name,
@@ -840,7 +855,12 @@ def run_research_candidate(
                 "score_truncation": candidate.score_truncation,
                 "long_count": long_count,
                 "short_count": short_count,
-                "full_book": bool(long_count >= candidate.top_n and short_count >= candidate.top_n),
+                "full_book": _is_full_book(
+                    long_count=long_count,
+                    short_count=short_count,
+                    top_n=candidate.top_n,
+                    book_mode=candidate.book_mode,
+                ),
             }
         )
         if not targets.empty:

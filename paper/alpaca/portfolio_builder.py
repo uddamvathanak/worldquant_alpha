@@ -15,6 +15,22 @@ class BuildResult:
     filtered_short_symbols: list[str]
 
 
+WEIGHTED_BOOK_MODES = {"sector_weighted", "none_weighted"}
+
+
+def _blank_targets() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "symbol",
+            "side",
+            "sector",
+            "score",
+            "target_weight",
+            "target_notional",
+        ]
+    )
+
+
 def _pick_sector_matched_books(
     longs: pd.DataFrame,
     shorts: pd.DataFrame,
@@ -82,6 +98,165 @@ def _pick_unmatched_books(
     return long_book, short_book
 
 
+def _center_scores(
+    signals: pd.DataFrame,
+    *,
+    by_sector: bool,
+) -> pd.DataFrame:
+    work = signals.copy()
+    work["symbol"] = work["symbol"].astype(str).str.strip().str.upper()
+    work["sector"] = work["sector"].astype(str).str.strip().replace("", "UNMAPPED")
+    work["score"] = pd.to_numeric(work["score"], errors="coerce")
+    work = work.dropna(subset=["symbol", "score"]).drop_duplicates(subset=["symbol"], keep="first").copy()
+    if work.empty:
+        return work
+
+    if by_sector:
+        work["centered_score"] = work["score"].astype(float) - work.groupby("sector")["score"].transform("mean").astype(float)
+    else:
+        work["centered_score"] = work["score"].astype(float) - float(work["score"].astype(float).mean())
+    work = work[work["centered_score"].abs() > 1e-12].copy()
+    return work.reset_index(drop=True)
+
+
+def _build_weighted_book(
+    signals: pd.DataFrame,
+    *,
+    equity: float,
+    gross_exposure: float,
+    book_mode: str,
+    shortable_map: dict[str, bool] | None = None,
+) -> BuildResult:
+    by_sector = book_mode == "sector_weighted"
+    work = _center_scores(signals, by_sector=by_sector)
+    if work.empty:
+        return BuildResult(
+            targets=_blank_targets(),
+            stats={
+                "long_count": 0,
+                "short_count": 0,
+                "matched_sector_count": 0,
+                "long_gross_target": gross_exposure / 2.0,
+                "short_gross_target": gross_exposure / 2.0,
+                "net_target": 0.0,
+                "book_mode": book_mode,
+                "fallback_used": False,
+                "weighted_mode": True,
+            },
+            filtered_short_symbols=[],
+        )
+
+    filtered_short_symbols: list[str] = []
+    if shortable_map is not None:
+        negative_mask = work["centered_score"] < 0
+        is_shortable = work.loc[negative_mask, "symbol"].map(lambda s: bool(shortable_map.get(str(s), False)))
+        filtered_short_symbols = work.loc[negative_mask & ~is_shortable.fillna(False), "symbol"].tolist()
+        work = work[~negative_mask | is_shortable.fillna(False)].copy()
+        work = work[work["centered_score"].abs() > 1e-12].copy()
+
+    if by_sector:
+        sector_counts = work.groupby(["sector", work["centered_score"] > 0]).size().unstack(fill_value=0)
+        valid_sectors = sector_counts[(sector_counts.get(False, 0) > 0) & (sector_counts.get(True, 0) > 0)].index.tolist()
+        work = work[work["sector"].isin(valid_sectors)].copy()
+
+    longs = work[work["centered_score"] > 0].copy()
+    shorts = work[work["centered_score"] < 0].copy()
+    if longs.empty or shorts.empty:
+        return BuildResult(
+            targets=_blank_targets(),
+            stats={
+                "long_count": 0,
+                "short_count": 0,
+                "matched_sector_count": 0,
+                "long_gross_target": gross_exposure / 2.0,
+                "short_gross_target": gross_exposure / 2.0,
+                "net_target": 0.0,
+                "book_mode": book_mode,
+                "fallback_used": True,
+                "weighted_mode": True,
+            },
+            filtered_short_symbols=filtered_short_symbols,
+        )
+
+    long_gross = float(gross_exposure) / 2.0
+    short_gross = float(gross_exposure) / 2.0
+    if by_sector:
+        sector_parts: list[pd.DataFrame] = []
+        sector_strengths: dict[str, float] = {}
+        for sector, frame in work.groupby("sector"):
+            pos = frame[frame["centered_score"] > 0].copy()
+            neg = frame[frame["centered_score"] < 0].copy()
+            if pos.empty or neg.empty:
+                continue
+            pos_strength = float(pos["centered_score"].sum())
+            neg_strength = float(neg["centered_score"].abs().sum())
+            sector_strength = min(pos_strength, neg_strength)
+            if sector_strength > 0:
+                sector_strengths[str(sector)] = sector_strength
+        total_strength = float(sum(sector_strengths.values()))
+        if total_strength <= 0:
+            return BuildResult(
+                targets=_blank_targets(),
+                stats={
+                    "long_count": 0,
+                    "short_count": 0,
+                    "matched_sector_count": 0,
+                    "long_gross_target": long_gross,
+                    "short_gross_target": short_gross,
+                    "net_target": 0.0,
+                    "book_mode": book_mode,
+                    "fallback_used": True,
+                    "weighted_mode": True,
+                },
+                filtered_short_symbols=filtered_short_symbols,
+            )
+        for sector, frame in work.groupby("sector"):
+            if str(sector) not in sector_strengths:
+                continue
+            sector_budget = long_gross * float(sector_strengths[str(sector)] / total_strength)
+            pos = frame[frame["centered_score"] > 0].copy()
+            neg = frame[frame["centered_score"] < 0].copy()
+            pos_sum = float(pos["centered_score"].sum())
+            neg_sum = float(neg["centered_score"].abs().sum())
+            pos["target_weight"] = pos["centered_score"].astype(float) * (sector_budget / pos_sum)
+            neg["target_weight"] = -neg["centered_score"].abs().astype(float) * (sector_budget / neg_sum)
+            pos["side"] = "long"
+            neg["side"] = "short"
+            sector_parts.extend([pos, neg])
+        targets = pd.concat(sector_parts, ignore_index=True)
+    else:
+        long_scale = long_gross / float(longs["centered_score"].sum())
+        short_scale = short_gross / float(shorts["centered_score"].abs().sum())
+        longs["target_weight"] = longs["centered_score"].astype(float) * long_scale
+        shorts["target_weight"] = -shorts["centered_score"].abs().astype(float) * short_scale
+        longs["side"] = "long"
+        shorts["side"] = "short"
+        targets = pd.concat([longs, shorts], ignore_index=True)
+
+    targets["target_notional"] = targets["target_weight"].astype(float) * float(equity)
+    targets = targets[
+        ["symbol", "side", "sector", "score", "target_weight", "target_notional"]
+    ].sort_values(["side", "symbol"], ascending=[True, True]).reset_index(drop=True)
+
+    stats = {
+        "long_count": int((targets["side"] == "long").sum()),
+        "short_count": int((targets["side"] == "short").sum()),
+        "matched_sector_count": int(targets["sector"].nunique()) if by_sector else 0,
+        "matched_sector_map": {},
+        "long_gross_target": float(targets.loc[targets["side"] == "long", "target_weight"].sum()),
+        "short_gross_target": float(-targets.loc[targets["side"] == "short", "target_weight"].sum()),
+        "net_target": float(targets["target_weight"].sum()),
+        "book_mode": book_mode,
+        "fallback_used": False,
+        "weighted_mode": True,
+    }
+    return BuildResult(
+        targets=targets,
+        stats=stats,
+        filtered_short_symbols=filtered_short_symbols,
+    )
+
+
 def build_sector_neutral_targets(
     signals: pd.DataFrame,
     *,
@@ -92,8 +267,17 @@ def build_sector_neutral_targets(
     shortable_map: dict[str, bool] | None = None,
 ) -> BuildResult:
     book_mode_norm = str(book_mode).strip().lower() or "sector"
-    if book_mode_norm not in {"sector", "none"}:
+    if book_mode_norm not in {"sector", "none", *WEIGHTED_BOOK_MODES}:
         raise ValueError(f"Unsupported book_mode: {book_mode}")
+
+    if book_mode_norm in WEIGHTED_BOOK_MODES:
+        return _build_weighted_book(
+            signals,
+            equity=equity,
+            gross_exposure=gross_exposure,
+            book_mode=book_mode_norm,
+            shortable_map=shortable_map,
+        )
 
     longs, shorts = select_long_short_candidates(signals, top_n=top_n)
 
@@ -117,16 +301,7 @@ def build_sector_neutral_targets(
         fallback_used = True
         long_book, short_book = _pick_unmatched_books(longs, shorts)
         if long_book.empty or short_book.empty:
-            targets = pd.DataFrame(
-                columns=[
-                    "symbol",
-                    "side",
-                    "sector",
-                    "score",
-                    "target_weight",
-                    "target_notional",
-                ]
-            )
+            targets = _blank_targets()
             stats = {
                 "long_count": 0,
                 "short_count": 0,

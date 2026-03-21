@@ -77,15 +77,16 @@ def run_pipeline_smoke(args: argparse.Namespace) -> None:
     trade_date = parse_trade_date(args.date)
     model = str(args.model or cfg.signal_model).strip().lower()
     requested_top_n = int(args.top_n) if args.top_n is not None else int(cfg.top_n)
+    requested_book_mode = str(args.book_mode).strip().lower() if args.book_mode else str(cfg.book_mode).strip().lower()
     requested_universe_size = max(10, int(args.universe_size))
 
     if model == "profit_asset_gate":
-        min_required = max(200, 4 * requested_top_n)
+        min_required = 400 if requested_book_mode in {"sector_weighted", "none_weighted"} else max(200, 4 * requested_top_n)
         if requested_universe_size < min_required:
             requested_universe_size = min_required
             print(f"adjusted_universe_size: {requested_universe_size}")
     elif model == "profit_asset_gate_proxy":
-        min_required = max(50, 2 * requested_top_n)
+        min_required = 200 if requested_book_mode in {"sector_weighted", "none_weighted"} else max(50, 2 * requested_top_n)
         if requested_universe_size < min_required:
             requested_universe_size = min_required
             print(f"adjusted_universe_size: {requested_universe_size}")
@@ -139,6 +140,7 @@ def run_pipeline_smoke(args: argparse.Namespace) -> None:
         strategy_file="",
         model=model,
         group_level=str(args.group_level or "auto"),
+        book_mode=requested_book_mode,
         lookback_days=int(args.lookback_days),
         smoothing=int(args.smoothing),
         top_n=requested_top_n if args.top_n is not None else None,
@@ -248,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--book-mode",
-        choices=["sector", "none"],
+        choices=["sector", "none", "sector_weighted", "none_weighted"],
         default="",
         help="Override portfolio construction mode for the smoke rebalance.",
     )

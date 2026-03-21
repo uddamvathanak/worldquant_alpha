@@ -13,6 +13,7 @@ from alpha_registry import (  # type: ignore  # noqa: E402
     StrategySpec,
     get_alpha_registry,
     load_strategy_spec,
+    resolve_alpha_set,
     write_strategy_spec,
 )
 
@@ -21,7 +22,16 @@ def test_alpha_registry_contains_wave_one_families() -> None:
     registry = get_alpha_registry()
     assert "rev_close_1d" in registry
     assert "profit_asset_gate_proxy_v2" in registry
+    assert "skip_month_momentum" in registry
     assert registry["profit_asset_gate_proxy_v2"].parameter_grid["profit_window"] == [42, 63, 84]
+
+
+def test_alpha_registry_resolves_literature_core_alias() -> None:
+    selected = resolve_alpha_set("literature_core")
+    names = [item.name for item in selected]
+    assert "skip_month_momentum" in names
+    assert "high_52w_proximity" in names
+    assert "low_volatility_defensive" in names
 
 
 def test_strategy_spec_round_trip(tmp_path: Path) -> None:
