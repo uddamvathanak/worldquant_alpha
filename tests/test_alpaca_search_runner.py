@@ -76,6 +76,7 @@ def _args(**overrides: object) -> Namespace:
         end_date="2026-03-19",
         feed="sip",
         baseline_file="",
+        alpha_set="",
         dynamic_baseline=False,
         promotion_profile="balanced",
         batch_size=0,
@@ -97,11 +98,12 @@ def _baseline(tmp_path: Path):  # type: ignore[no-untyped-def]
 
 def test_search_runner_parser_accepts_status_and_mutation_flags() -> None:
     parser = search_runner.build_parser()
-    args = parser.parse_args(["--status", "--run-id", "abc", "--mutation-only", "--dynamic-baseline"])
+    args = parser.parse_args(["--status", "--run-id", "abc", "--mutation-only", "--dynamic-baseline", "--alpha-set", "wave1"])
     assert args.status is True
     assert args.run_id == "abc"
     assert args.mutation_only is True
     assert args.dynamic_baseline is True
+    assert args.alpha_set == "wave1"
 
 
 def test_determine_start_stage_advances_after_completed_stage() -> None:
@@ -113,6 +115,17 @@ def test_determine_start_stage_advances_after_completed_stage() -> None:
     stage = search_runner._determine_start_stage(state, args=_args())
 
     assert stage == "stability_expand"
+
+
+def test_base_state_uses_alpha_set_override(tmp_path: Path) -> None:
+    ctx = _context(tmp_path)
+    state = search_runner._base_state(
+        ctx.run_id,
+        args=_args(alpha_set="wave1"),
+        cfg=ctx.cfg,
+        baseline=_baseline(tmp_path),
+    )
+    assert state["config"]["alpha_set"] == "wave1"
 
 
 def test_stage_b_candidates_only_expand_phase_a_survivors(tmp_path: Path) -> None:

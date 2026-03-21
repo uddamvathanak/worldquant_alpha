@@ -381,6 +381,7 @@ def _load_baseline(cfg: Any, args: argparse.Namespace) -> ResearchBaseline:
 def _base_state(run_id: str, *, args: argparse.Namespace, cfg: Any, baseline: ResearchBaseline) -> dict[str, Any]:
     end_date = str(args.end_date or baseline.end_date.isoformat())
     feed = str(args.feed).strip().lower() or baseline.feed or DEFAULT_FEED
+    alpha_set = str(getattr(args, "alpha_set", "") or "").strip() or baseline.alpha_set or SCREEN_ALPHA_SET
     return {
         "run_id": run_id,
         "created_at": _utc_now_iso(),
@@ -409,7 +410,7 @@ def _base_state(run_id: str, *, args: argparse.Namespace, cfg: Any, baseline: Re
             "promotion_profile": str(args.promotion_profile or DEFAULT_PROMOTION_PROFILE),
             "batch_size": int(args.batch_size or cfg.alpha_search_batch_size),
             "max_runtime_min": int(args.max_runtime_min or cfg.alpha_search_max_runtime_min),
-            "alpha_set": SCREEN_ALPHA_SET,
+            "alpha_set": alpha_set,
             "gross_exposure": cfg.gross_exposure,
             "shadow_only": True,
         },
@@ -533,11 +534,11 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
-def _stage_a_candidates(gross_exposure: float) -> list[dict[str, Any]]:
+def _stage_a_candidates(gross_exposure: float, *, alpha_set: str) -> list[dict[str, Any]]:
     from backtest_engine import expand_research_candidates
 
     candidates = expand_research_candidates(
-        alpha_set=SCREEN_ALPHA_SET,
+        alpha_set=alpha_set,
         group_level_grid=SCREEN_GROUP_LEVELS,
         book_mode_grid=SCREEN_BOOK_MODES,
         top_n_grid=SCREEN_TOP_N,
@@ -748,7 +749,10 @@ def _stage_queue_records(
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if stage == "registry_screen":
-        return _stage_a_candidates(ctx.cfg.gross_exposure)
+        return _stage_a_candidates(
+            ctx.cfg.gross_exposure,
+            alpha_set=str(state.get("config", {}).get("alpha_set", SCREEN_ALPHA_SET) or SCREEN_ALPHA_SET),
+        )
     if stage == "stability_expand":
         return _stage_b_candidates(ctx, gross_exposure=ctx.cfg.gross_exposure)
     if stage == "full_validation":
@@ -1050,6 +1054,7 @@ def _write_search_report(ctx: SearchContext, *, state: dict[str, Any]) -> None:
         f"- generated_at_utc: {_utc_now_iso()}",
         f"- baseline_id: {state.get('config', {}).get('baseline_id', '')}",
         f"- baseline_file: {state.get('config', {}).get('baseline_file', '')}",
+        f"- alpha_set: {state.get('config', {}).get('alpha_set', '')}",
         f"- current_stage: {state.get('current_stage', '')}",
         f"- current_activity: {state.get('current_activity', '') or 'unknown'}",
         f"- active_candidate: {state.get('active_candidate_name', '') or 'none'}",
@@ -1165,6 +1170,7 @@ def _print_status(ctx: SearchContext, *, state: dict[str, Any]) -> int:
     winner_summary = _read_json(ctx.summary_path, default={})
     print(f"run_id: {ctx.run_id}")
     print(f"baseline_id: {state.get('config', {}).get('baseline_id', '')}")
+    print(f"alpha_set: {state.get('config', {}).get('alpha_set', '')}")
     print(f"current_stage: {state.get('current_stage', '')}")
     print(f"current_activity: {state.get('current_activity', '')}")
     print(f"active_candidate_id: {state.get('active_candidate_id', '')}")
@@ -1286,6 +1292,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mutation-only", action="store_true", help="Run only the mutation stage.")
     parser.add_argument("--status", action="store_true", help="Print status for the latest or provided run.")
     parser.add_argument("--baseline-file", default="", help="Optional research baseline JSON file.")
+    parser.add_argument("--alpha-set", default="", help="Override the alpha set used for registry screening.")
     parser.add_argument(
         "--dynamic-baseline",
         action="store_true",
