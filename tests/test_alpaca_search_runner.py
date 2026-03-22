@@ -225,6 +225,46 @@ def test_stage_c_candidates_tolerate_missing_positive_month_ratio(tmp_path: Path
     assert out == []
 
 
+def test_append_result_row_rewrites_existing_csv_with_aligned_columns(tmp_path: Path) -> None:
+    path = tmp_path / "results.csv"
+    search_runner._append_result_row(
+        path,
+        {
+            "candidate_id": "a",
+            "candidate_name": "alpha_a",
+            "alpha_name": "smooth_momentum",
+            "family": "momentum",
+            "params": {"window": 20},
+            "group_level": "sector",
+            "book_mode": "sector_weighted",
+            "top_n": 3000,
+            "gross_exposure": 4.0,
+            "signal_decay": 0,
+            "score_truncation": None,
+            "test_returns": 0.1,
+        },
+    )
+    search_runner._append_result_row(
+        path,
+        {
+            "test_returns": 0.2,
+            "score_truncation": None,
+            "signal_decay": 0,
+            "gross_exposure": 4.0,
+            "top_n": 3000,
+            "book_mode": "sector_weighted",
+            "group_level": "sector",
+            "params": {"window": 42},
+            "family": "momentum",
+            "alpha_name": "smooth_momentum",
+            "candidate_name": "alpha_b",
+            "candidate_id": "b",
+        },
+    )
+    frame = pd.read_csv(path)
+    assert frame["candidate_name"].tolist() == ["alpha_a", "alpha_b"]
+
+
 def test_process_stage_skips_completed_candidates_on_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _context(tmp_path)
     candidate_a = ResearchCandidate(

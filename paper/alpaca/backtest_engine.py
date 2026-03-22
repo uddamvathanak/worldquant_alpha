@@ -756,25 +756,44 @@ def run_research_candidate(
     round_trip_cost_bps: float,
     initial_equity: float = DEFAULT_INITIAL_EQUITY,
     min_scored_symbols: int | None = None,
+    open_returns: pd.DataFrame | None = None,
+    score_panel_cache: Any | None = None,
+    prepared_cache_key: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     min_scored = int(min_scored_symbols or _min_scored_requirement(top_n=candidate.top_n, book_mode=candidate.book_mode))
     signal_dates = execution_map["signal_date"].drop_duplicates().tolist()
-    score_panel, _ = compute_alpha_score_panel(
-        candidate.alpha_name,
-        bars,
-        classifications=classifications,
-        sector_map=None,
-        group_level=candidate.group_level,
-        params=candidate.params,
-        score_truncation=candidate.score_truncation,
-        signal_decay=candidate.signal_decay,
-        signal_dates=signal_dates,
-        min_scored_symbols=min_scored,
-    )
+    score_panel: pd.DataFrame | None = None
+    score_cache_key: str | None = None
+    if score_panel_cache is not None and prepared_cache_key:
+        score_cache_key = score_panel_cache.build_score_key(
+            prepared_key=prepared_cache_key,
+            alpha_name=candidate.alpha_name,
+            params=candidate.params,
+            group_level=candidate.group_level,
+            signal_decay=candidate.signal_decay,
+            score_truncation=candidate.score_truncation,
+            min_scored_symbols=min_scored,
+        )
+        score_panel = score_panel_cache.load_score_panel(prepared_cache_key, score_cache_key)
+    if score_panel is None:
+        score_panel, _ = compute_alpha_score_panel(
+            candidate.alpha_name,
+            bars,
+            classifications=classifications,
+            sector_map=None,
+            group_level=candidate.group_level,
+            params=candidate.params,
+            score_truncation=candidate.score_truncation,
+            signal_decay=candidate.signal_decay,
+            signal_dates=signal_dates,
+            min_scored_symbols=min_scored,
+        )
+        if score_panel_cache is not None and prepared_cache_key and score_cache_key and not score_panel.empty:
+            score_panel_cache.save_score_panel(prepared_cache_key, score_cache_key, score_panel)
     if score_panel.empty:
         raise BacktestError(f"Candidate {candidate.name} produced no score panel.")
 
-    open_returns = _build_open_return_frame(bars)
+    open_returns = open_returns.copy() if open_returns is not None else _build_open_return_frame(bars)
     equity = float(initial_equity)
     previous_weights = pd.Series(dtype="float64")
     daily_rows: list[dict[str, Any]] = []

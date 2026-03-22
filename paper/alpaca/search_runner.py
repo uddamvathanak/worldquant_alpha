@@ -184,7 +184,16 @@ def _candidate_cache_signature(record: dict[str, Any]) -> str:
 def _append_result_row(path: Path, row: dict[str, Any]) -> None:
     serialized = _serialize_row(row)
     frame = pd.DataFrame([serialized])
-    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+    if not path.exists():
+        frame.to_csv(path, index=False)
+        return
+    try:
+        existing = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        frame.to_csv(path, index=False)
+        return
+    combined = pd.concat([existing, frame], ignore_index=True, sort=False)
+    combined.to_csv(path, index=False)
 
 
 def _ensure_results_file(path: Path, *, columns: list[str]) -> None:
@@ -328,6 +337,9 @@ def _evaluate_candidate_record(
         prepared["execution_map"],
         candidate,
         round_trip_cost_bps=round_trip_cost_bps,
+        open_returns=prepared.get("open_returns"),
+        score_panel_cache=prepared.get("materialized_cache"),
+        prepared_cache_key=prepared.get("prepared_cache_key"),
     )
     daily["split"] = daily["execution_date"].map(prepared["split_map"])
     if not targets.empty:

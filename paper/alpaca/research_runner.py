@@ -11,6 +11,7 @@ from alpha_registry import StrategyMember, StrategySpec, selected_strategy_path,
 from backtest_engine import (
     BacktestError,
     ResearchCandidate,
+    _build_open_return_frame,
     _build_execution_calendar_maps,
     build_basket_daily_returns,
     build_basket_targets,
@@ -35,6 +36,7 @@ from config import load_config, parse_trade_date
 from historical_store import HistoricalStore
 from monthly_eval import compute_proxy_metrics
 from research_baseline import ResearchBaseline, load_research_baseline
+from research_materialized_cache import ResearchMaterializedCache
 
 
 DEFAULT_FEED = "sip"
@@ -105,6 +107,7 @@ def _prepare_inputs(
     min_universe: int = DEFAULT_MIN_UNIVERSE,
     min_universe_ratio: float = DEFAULT_MIN_UNIVERSE_RATIO,
 ) -> dict[str, Any]:
+    materialized_cache = ResearchMaterializedCache(cfg.cache_dir)
     try:
         classification_snapshot_path = resolve_classification_snapshot_path(
             cfg.reference_dir,
@@ -124,6 +127,25 @@ def _prepare_inputs(
         candidate_symbols = sorted(set(symbol_master["symbol"].astype(str).str.upper().tolist()))
     if not candidate_symbols:
         raise BacktestError("Classification cache produced no candidate symbols.")
+
+    prepared_key = materialized_cache.build_prepared_key(
+        end_date=end_date,
+        classification_snapshot_path=classification_snapshot_path,
+        classification_snapshot_date=classification_snapshot_date or end_date,
+        feed=feed,
+        train_days=train_days,
+        oos_days=oos_days,
+        test_days=test_days,
+        min_universe=min_universe,
+        min_universe_ratio=min_universe_ratio,
+    )
+    cached = materialized_cache.load_prepared_inputs(prepared_key)
+    if cached is not None:
+        cached["classifications"] = classifications
+        cached["symbol_master"] = symbol_master
+        cached["store"] = HistoricalStore(cfg.cache_dir)
+        cached["materialized_cache"] = materialized_cache
+        return cached
 
     store = HistoricalStore(cfg.cache_dir)
     trading_days = store.load_trading_calendar(
@@ -176,7 +198,12 @@ def _prepare_inputs(
             min_symbols=int(min_universe),
         )
         if coverage_ratio >= float(min_universe_ratio):
-            return {
+            prepared = {
+                "prepared_cache_key": prepared_key,
+                "end_date": end_date.isoformat(),
+                "feed": str(feed).strip().lower(),
+                "min_universe": int(min_universe),
+                "min_universe_ratio": float(min_universe_ratio),
                 "classification_snapshot_path": classification_snapshot_path,
                 "classification_snapshot_date": (
                     classification_snapshot_date or end_date
@@ -188,10 +215,14 @@ def _prepare_inputs(
                 "splits": splits,
                 "execution_map": execution_map,
                 "bars": canonical_bars,
+                "open_returns": _build_open_return_frame(canonical_bars),
                 "universe_lookup": universe_lookup,
                 "coverage_ratio": coverage_ratio,
                 "degraded_depth": degraded_depth,
+                "materialized_cache": materialized_cache,
             }
+            materialized_cache.save_prepared_inputs(prepared)
+            return prepared
         last_error = BacktestError(
             f"Universe coverage ratio {coverage_ratio:.3f} below required {float(min_universe_ratio):.2f}"
         )
@@ -476,6 +507,9 @@ def _run_selected_iex_robustness(
             execution_map,
             candidate,
             round_trip_cost_bps=cfg.round_trip_cost_bps,
+            open_returns=prepared.get("open_returns"),
+            score_panel_cache=prepared.get("materialized_cache"),
+            prepared_cache_key=prepared.get("prepared_cache_key"),
         )
         daily["split"] = daily["execution_date"].map(split_map)
         daily_frames[candidate.name] = daily
@@ -580,6 +614,9 @@ def run_research(args: argparse.Namespace) -> int:
             train_map,
             candidate,
             round_trip_cost_bps=cfg.round_trip_cost_bps,
+            open_returns=prepared.get("open_returns"),
+            score_panel_cache=prepared.get("materialized_cache"),
+            prepared_cache_key=prepared.get("prepared_cache_key"),
         )
         train_rows.append(summarize_research_candidate(daily, targets, candidate))
 
@@ -619,6 +656,9 @@ def run_research(args: argparse.Namespace) -> int:
             execution_map,
             candidate,
             round_trip_cost_bps=cfg.round_trip_cost_bps,
+            open_returns=prepared.get("open_returns"),
+            score_panel_cache=prepared.get("materialized_cache"),
+            prepared_cache_key=prepared.get("prepared_cache_key"),
         )
         daily["split"] = daily["execution_date"].map(split_map)
         if not targets.empty:

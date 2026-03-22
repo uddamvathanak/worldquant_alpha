@@ -12,13 +12,18 @@ ALPACA_DIR = Path(__file__).resolve().parents[1] / "paper" / "alpaca"
 if str(ALPACA_DIR) not in sys.path:
     sys.path.insert(0, str(ALPACA_DIR))
 
+import backtest_engine as be  # type: ignore  # noqa: E402
 from backtest_engine import (  # type: ignore  # noqa: E402
     BacktestCandidate,
+    ResearchCandidate,
+    _build_open_return_frame,
     _select_best_candidate,
     build_split_windows,
     canonicalize_bars,
     run_backtest_candidate,
+    run_research_candidate,
 )
+from research_materialized_cache import ResearchMaterializedCache  # type: ignore  # noqa: E402
 
 
 def _backtest_fixture_bars() -> pd.DataFrame:
@@ -246,3 +251,89 @@ def test_canonicalize_bars_merges_symbol_aliases() -> None:
     out = canonicalize_bars(bars, symbol_master)
     assert set(out["symbol"]) == {"NEW"}
     assert len(out) == 2
+
+
+def test_run_research_candidate_reuses_score_panel_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bars = _backtest_fixture_bars()
+    classifications = _backtest_classifications()
+    universe_lookup = {
+        date(2026, 1, 6): pd.DataFrame({"symbol": ["AAA", "BBB", "CCC", "DDD"]}),
+        date(2026, 1, 7): pd.DataFrame({"symbol": ["AAA", "BBB", "CCC", "DDD"]}),
+    }
+    execution_map = pd.DataFrame(
+        [
+            {
+                "execution_date": date(2026, 1, 7),
+                "signal_date": date(2026, 1, 6),
+                "next_execution_date": date(2026, 1, 8),
+            },
+            {
+                "execution_date": date(2026, 1, 8),
+                "signal_date": date(2026, 1, 7),
+                "next_execution_date": date(2026, 1, 9),
+            },
+        ]
+    )
+    candidate = ResearchCandidate(
+        alpha_name="smooth_momentum",
+        family="momentum",
+        params={"window": 20},
+        group_level="sector",
+        book_mode="sector_weighted",
+        top_n=3000,
+        gross_exposure=4.0,
+    )
+    score_panel = pd.DataFrame(
+        {
+            "symbol": ["AAA", "BBB", "CCC", "DDD", "AAA", "BBB", "CCC", "DDD"],
+            "trade_date": [
+                date(2026, 1, 6),
+                date(2026, 1, 6),
+                date(2026, 1, 6),
+                date(2026, 1, 6),
+                date(2026, 1, 7),
+                date(2026, 1, 7),
+                date(2026, 1, 7),
+                date(2026, 1, 7),
+            ],
+            "sector": ["Tech", "Tech", "Health", "Health", "Tech", "Tech", "Health", "Health"],
+            "score": [0.4, -0.4, 0.3, -0.3, 0.5, -0.5, 0.2, -0.2],
+            "base_score": [0.4, -0.4, 0.3, -0.3, 0.5, -0.5, 0.2, -0.2],
+        }
+    )
+    calls = {"count": 0}
+
+    def fake_compute_alpha_score_panel(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        return score_panel.copy(), pd.DataFrame()
+
+    monkeypatch.setattr(be, "compute_alpha_score_panel", fake_compute_alpha_score_panel)
+    cache = ResearchMaterializedCache(tmp_path)
+    open_returns = _build_open_return_frame(bars)
+
+    run_research_candidate(
+        bars,
+        classifications,
+        universe_lookup,
+        execution_map,
+        candidate,
+        round_trip_cost_bps=5.0,
+        min_scored_symbols=2,
+        open_returns=open_returns,
+        score_panel_cache=cache,
+        prepared_cache_key="prepared_a",
+    )
+    run_research_candidate(
+        bars,
+        classifications,
+        universe_lookup,
+        execution_map,
+        candidate,
+        round_trip_cost_bps=5.0,
+        min_scored_symbols=2,
+        open_returns=open_returns,
+        score_panel_cache=cache,
+        prepared_cache_key="prepared_a",
+    )
+
+    assert calls["count"] == 1
